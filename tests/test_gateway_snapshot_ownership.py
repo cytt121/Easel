@@ -2,6 +2,7 @@
 import asyncio
 import subprocess
 import sys
+import threading
 
 import pytest
 
@@ -87,8 +88,9 @@ def test_queued_turn_preserves_owner_until_lock_acquired(sandbox, owner_status):
     asyncio.run(scenario())
 
 
-def test_rejected_turn_keeps_owner_and_reports_error_in_its_own_log(sandbox):
+def test_rejected_turn_keeps_owner_and_reports_error_in_its_own_log(sandbox, monkeypatch):
     sandbox.allow = False
+    monkeypatch.setattr(web, "TIMEOUT_CHAT", 0)
 
     async def scenario():
         web._save_turn("web:busy", "running", "owner progress", {"turn_id": "owner"})
@@ -102,7 +104,7 @@ def test_rejected_turn_keeps_owner_and_reports_error_in_its_own_log(sandbox):
         assert any(event["event"] == "error" for event in replay)
         assert replay[-1]["event"] == "done"
         assert not web._session_lock("busy").locked()
-        assert sandbox.releases == 1
+        assert sandbox.releases >= 1
 
     asyncio.run(scenario())
 
@@ -148,6 +150,158 @@ def test_invalid_transport_pin_finishes_turn_and_releases_ownership(sandbox, mon
         # A damaged pin must not silently move an established HTTP session to
         # the CLI's different transcript. Leave it intact and report failure.
         assert pin.read_bytes() == b"\xff\xfe"
+
+    asyncio.run(scenario())
+
+
+def test_process_lock_waiter_can_acquire_after_owner_releases(sandbox, monkeypatch):
+    async def scenario():
+        tried = asyncio.Event()
+        owner_released = False
+
+        def acquire(self, timeout):
+            sandbox.held = owner_released
+            tried.set()
+            return owner_released
+
+        monkeypatch.setattr(sandbox, "acquire", acquire)
+        web._save_turn("web:retry-lock", "running", "owner result", {"turn_id": "owner"})
+        original = web._turn_file("web:retry-lock").read_bytes()
+        response = await web.api_chat_stream(web.ChatRequest(
+            message="wait", sessionId="retry-lock", turnId="waiter"))
+        try:
+            await asyncio.wait_for(tried.wait(), timeout=2)
+            assert web._turn_file("web:retry-lock").read_bytes() == original
+            owner_released = True
+            await collect(response)
+            snapshot = await web.api_chat_last("retry-lock", turn_id="waiter")
+            assert snapshot["stop_reason"] == "spawn_failed"
+            assert not web._session_lock("retry-lock").locked()
+            assert not sandbox.held
+        finally:
+            for task in list(web._BG_TASKS):
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+            await response.body_iterator.aclose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("stage", ["local_lock", "process_lock", "transport"])
+def test_cancelled_startup_releases_only_its_ownership(sandbox, monkeypatch, stage):
+    release_worker = threading.Event()
+    worker_finished = threading.Event()
+
+    async def scenario():
+        loop = asyncio.get_running_loop()
+        entered = asyncio.Event()
+        callback_errors = []
+        loop.set_exception_handler(lambda _loop, context: callback_errors.append(context))
+        lock = web._session_lock("cancel-startup")
+        web._save_turn("web:cancel-startup", "running", "owner result", {"turn_id": "owner"})
+        original = web._turn_file("web:cancel-startup").read_bytes()
+        if stage == "local_lock":
+            await lock.acquire()
+        elif stage == "process_lock":
+            def acquire(self, timeout):
+                loop.call_soon_threadsafe(entered.set)
+                try:
+                    if timeout == 0:
+                        return False
+                    # A cancelled executor future cannot stop this worker:
+                    # it can acquire the OS lock after its caller has exited.
+                    assert release_worker.wait(5)
+                    sandbox.held = True
+                    return True
+                finally:
+                    worker_finished.set()
+            monkeypatch.setattr(sandbox, "acquire", acquire)
+        else:
+            def resolve(sk):
+                loop.call_soon_threadsafe(entered.set)
+                try:
+                    assert release_worker.wait(5)
+                    return "cli"
+                finally:
+                    worker_finished.set()
+            monkeypatch.setattr(web, "_resolve_transport", resolve)
+
+        response = await web.api_chat_stream(web.ChatRequest(
+            message="cancel", sessionId="cancel-startup", turnId="cancelled-turn"))
+        task, = web._BG_TASKS
+        try:
+            if stage == "local_lock":
+                while True:
+                    event = await asyncio.wait_for(anext(response.body_iterator), timeout=2)
+                    if "排队" in event.get("data", ""):
+                        break
+            else:
+                await asyncio.wait_for(entered.wait(), timeout=2)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, timeout=2)
+            release_worker.set()
+            if stage != "local_lock":
+                assert await asyncio.to_thread(worker_finished.wait, 2)
+            assert lock.locked() == (stage == "local_lock")
+            assert not sandbox.held
+            if stage == "transport":
+                snapshot = await web.api_chat_last("cancel-startup", turn_id="cancelled-turn")
+                assert snapshot["status"] == "done"
+                assert snapshot["stop_reason"] == "cancelled"
+            else:
+                assert web._turn_file("web:cancel-startup").read_bytes() == original
+            events = await collect(response)
+            assert events[-1]["event"] == "done"
+            assert not web._BG_TASKS
+            assert not callback_errors
+        finally:
+            release_worker.set()
+            if not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+            if lock.locked():
+                lock.release()
+            await response.body_iterator.aclose()
+
+    asyncio.run(scenario())
+
+
+def test_disconnected_reader_does_not_cancel_startup(sandbox, monkeypatch):
+    release_worker = threading.Event()
+
+    async def scenario():
+        loop = asyncio.get_running_loop()
+        entered = asyncio.Event()
+
+        def resolve(sk):
+            loop.call_soon_threadsafe(entered.set)
+            assert release_worker.wait(5)
+            return "cli"
+
+        monkeypatch.setattr(web, "_resolve_transport", resolve)
+        response = await web.api_chat_stream(web.ChatRequest(
+            message="disconnect", sessionId="disconnect", turnId="disconnect-turn"))
+        task, = web._BG_TASKS
+        try:
+            await asyncio.wait_for(anext(response.body_iterator), timeout=2)
+            await asyncio.wait_for(entered.wait(), timeout=2)
+            await response.body_iterator.aclose()
+            assert not task.done()
+            assert web._session_lock("disconnect").locked()
+            release_worker.set()
+            await asyncio.wait_for(task, timeout=2)
+            snapshot = await web.api_chat_last("disconnect", turn_id="disconnect-turn")
+            assert snapshot["stop_reason"] == "spawn_failed"
+            assert web._read_job_events("disconnect-turn")[-1]["event"] == "done"
+            assert not web._session_lock("disconnect").locked()
+            assert not sandbox.held
+        finally:
+            release_worker.set()
+            if not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+            await response.body_iterator.aclose()
 
     asyncio.run(scenario())
 

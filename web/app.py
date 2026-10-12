@@ -3082,26 +3082,31 @@ async def api_chat_stream(req: ChatRequest):
         xlock = _CrossProcLock(sk)
         if lock.locked():
             to_client("activity", "⏳ 这个会话上一条还在跑，排队等它结束再开始…")
-        await lock.acquire()
-        # flock 可能阻塞（等另一进程/标签跑完），放线程池避免卡住事件循环
-        got = await loop.run_in_executor(None, xlock.acquire, min(TIMEOUT_CHAT, 300))
-        if not got:
-            xlock.release()
-            lock.release()
-            # This turn never owned the session: report through its own event
-            # log without replacing the active owner's recovery snapshot.
-            to_client("error", "这个会话正在另一个窗口运行，请稍候再试。")
-            to_client("done", sessionKey=sk)
-            client_q.put_nowait(CLIENT_DONE)
-            return
-
-        # Only the owner of both locks may replace the per-session snapshot.
-        # Queued clients recover from their turn log; /last checks turn_id.
-        _save_turn(pk, "running", "", {"turn_id": turn_id})
-
-        # _resolve_transport 里既有 stat 又有阻塞 urllib 探针（最多 3s），必须丢线程：
-        # 直接在协程里调会把整个事件循环——连同其它会话正在推的 SSE——一起卡住。
+        locked = claimed = started = False
+        startup_reason = "spawn_failed"
+        startup_error = None
         try:
+            await lock.acquire()
+            locked = True
+            # Match direct-API locking: nonblocking attempts with cancellable
+            # sleeps. An executor worker could acquire a lock after cancellation
+            # and outlive its owner, leaving the session permanently locked.
+            lock_deadline = time.monotonic() + min(TIMEOUT_CHAT, 300)
+            while True:
+                if xlock.acquire(0):
+                    break
+                xlock.release()
+                if time.monotonic() >= lock_deadline:
+                    startup_error = "这个会话正在另一个窗口运行，请稍候再试。"
+                    return
+                await asyncio.sleep(0.2)
+
+            # Only the owner of both locks may replace the session snapshot.
+            _save_turn(pk, "running", "", {"turn_id": turn_id})
+            claimed = True
+
+            # Transport selection includes a blocking network probe; keep it
+            # off the event loop. It cannot start an agent or acquire locks.
             is_http = (await asyncio.to_thread(_resolve_transport, sk)) == "http"
             if is_http:
                 # HTTP 直连常驻网关：无进程冷启动（agent 在 gateway 进程里跑）
@@ -3111,18 +3116,29 @@ async def api_chat_stream(req: ChatRequest):
                     cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                     cwd=str(PROJECT_ROOT), text=True, bufsize=1, env=env,
                 )
+            started = True
+        except asyncio.CancelledError:
+            startup_reason = "cancelled"
+            raise
         except Exception:
-            # Transport selection can also fail (for example a damaged pin).
-            # Finish the owned snapshot before allowing another turn to run.
-            _save_turn(pk, "done", "❌ 启动失败，请重试", {
-                "turn_id": turn_id, "clean_end": False, "stop_reason": "spawn_failed",
-            })
-            xlock.release()
-            lock.release()
-            to_client("error", "❌ 启动失败，请重试")
-            to_client("done", sessionKey=sk)
-            client_q.put_nowait(CLIENT_DONE)
+            startup_error = "❌ 启动失败，请重试"
             return
+        finally:
+            if not started:
+                # A queued/cancelled waiter never owns the previous snapshot.
+                # Persist an owned failure before releasing either lock.
+                if claimed:
+                    _save_turn(pk, "done", startup_error or "", {
+                        "turn_id": turn_id, "clean_end": False,
+                        "stop_reason": startup_reason,
+                    })
+                xlock.release()
+                if locked:
+                    lock.release()
+                if startup_error:
+                    to_client("error", startup_error)
+                to_client("done", sessionKey=sk)
+                client_q.put_nowait(CLIENT_DONE)
         _RUNNING_CHAT[sk] = proc         # 注册运行中进程（HTTP 模式为伪进程），供 /api/chat/stop
         # 经 gateway 后客户端 stdout 没有 model-fetch 标记（那是独立跑 agent 才有），先立刻
         # 给一个「正在思考」活动指示，随后 token 从共享 raw stream 流进来接管显示。
@@ -3463,6 +3479,9 @@ async def api_chat_stream(req: ChatRequest):
 
     def _bg_done(t):
         _BG_TASKS.discard(t)
+        if t.cancelled():
+            client_q.put_nowait(CLIENT_DONE)
+            return
         try:
             exc = t.exception()   # 取出异常避免「never retrieved」告警
         except Exception:
