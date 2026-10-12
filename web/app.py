@@ -2674,11 +2674,25 @@ def _read_job_events(turn_id: str, after: int = 0) -> list[dict]:
         return []
     events = []
     try:
-        for line in path.read_text(encoding="utf-8").splitlines():
-            event = json.loads(line)
-            if int(event.get("id", 0)) > after:
-                events.append(event)
-    except (OSError, ValueError, json.JSONDecodeError):
+        # Read/decode each record separately: a concurrent append can end in
+        # partial JSON or even half a UTF-8 character. Keep valid records and
+        # retry the incomplete tail on the next read without changing the log.
+        with path.open("rb") as stream:
+            for line in stream:
+                try:
+                    event = json.loads(line)
+                except (ValueError, UnicodeError):
+                    continue
+                if not isinstance(event, dict):
+                    continue
+                event_id = event.get("id")
+                if (type(event_id) is not int or event_id <= 0
+                        or not isinstance(event.get("event"), str)
+                        or not event["event"]):
+                    continue
+                if event_id > after:
+                    events.append(event)
+    except OSError:
         return []
     return events
 
@@ -2923,10 +2937,6 @@ async def api_chat_stream(req: ChatRequest):
         full_text: list[str] = []        # 累积完整回答，供断线取回
         timed_out = False                # 只有真·超时才 terminate 进程；断线绝不杀
 
-        # Claim this turn before waiting for locks, so recovery cannot return the previous turn.
-        if not direct:
-            _save_turn(pk, "running", "", {"turn_id": turn_id})
-
         event_path = _job_event_file(turn_id)
         try:
             event_path.parent.mkdir(parents=True, exist_ok=True)
@@ -3014,11 +3024,14 @@ async def api_chat_stream(req: ChatRequest):
                             if rc:
                                 run_info["sse_thinking"] = True
                                 run_info["thinking_chars"] += len(rc)
-                                _emit("thinking", rc)
+                                q.put_nowait({"t": "thinking", "text": rc})
                             c = delta.get("content")
                             if c:
                                 got_text = True
-                                _emit("token", c)
+                                # Already on the event loop: enqueue directly.
+                                # _emit schedules a callback which can run after
+                                # this coroutine's completion sentinel.
+                                q.put_nowait({"t": "token", "text": c})
                             if delta.get("tool_calls") and not tool_noted:
                                 tool_noted = True
                                 to_client("activity", "🔧 正在执行操作…")
@@ -3073,14 +3086,18 @@ async def api_chat_stream(req: ChatRequest):
         # flock 可能阻塞（等另一进程/标签跑完），放线程池避免卡住事件循环
         got = await loop.run_in_executor(None, xlock.acquire, min(TIMEOUT_CHAT, 300))
         if not got:
+            xlock.release()
             lock.release()
-            _save_turn(pk, "done", "这个会话正在另一个窗口运行，请稍候再试。", {
-                "turn_id": turn_id, "clean_end": False, "stop_reason": "session_lock_timeout",
-            })
-            to_client("activity", "⏳ 这个会话正在另一个窗口运行，请稍候再试")
+            # This turn never owned the session: report through its own event
+            # log without replacing the active owner's recovery snapshot.
+            to_client("error", "这个会话正在另一个窗口运行，请稍候再试。")
             to_client("done", sessionKey=sk)
             client_q.put_nowait(CLIENT_DONE)
             return
+
+        # Only the owner of both locks may replace the per-session snapshot.
+        # Queued clients recover from their turn log; /last checks turn_id.
+        _save_turn(pk, "running", "", {"turn_id": turn_id})
 
         # _resolve_transport 里既有 stat 又有阻塞 urllib 探针（最多 3s），必须丢线程：
         # 直接在协程里调会把整个事件循环——连同其它会话正在推的 SSE——一起卡住。
@@ -3095,11 +3112,11 @@ async def api_chat_stream(req: ChatRequest):
                     cwd=str(PROJECT_ROOT), text=True, bufsize=1, env=env,
                 )
             except BaseException:
-                lock.release()
-                xlock.release()
                 _save_turn(pk, "done", "❌ 启动失败，请重试", {
                     "turn_id": turn_id, "clean_end": False, "stop_reason": "spawn_failed",
                 })
+                xlock.release()
+                lock.release()
                 to_client("error", "❌ 启动失败，请重试")
                 to_client("done", sessionKey=sk)
                 client_q.put_nowait(CLIENT_DONE)
@@ -3283,7 +3300,10 @@ async def api_chat_stream(req: ChatRequest):
             except Exception:
                 pass
             finally:
-                loop.call_soon_threadsafe(q.put_nowait, SENTINEL)
+                # HTTP completion belongs to _run_gateway_turn. The optional
+                # raw reader must not end that stream or overtake its tokens.
+                if not is_http:
+                    loop.call_soon_threadsafe(q.put_nowait, SENTINEL)
 
         stdout_fut = None
         if is_http:
