@@ -22,6 +22,7 @@ def test_gateway_stream_preserves_every_token(tmp_path, monkeypatch, parts, buff
     monkeypatch.setattr(web, "_STOPPED_CHAT", set())
     monkeypatch.setattr(web, "_BG_TASKS", set())
     monkeypatch.setattr(web, "_direct_api_enabled", lambda: False)
+    monkeypatch.setattr(web, "_chat_backend", lambda session_id: "openclaw", raising=False)
     monkeypatch.setattr(web, "_chat_message", lambda req: req.message)
     monkeypatch.setattr(web, "_heal_openclaw_session", lambda sk: None)
     monkeypatch.setattr(web, "openclaw_base_cmd", lambda: ["unused-openclaw"])
