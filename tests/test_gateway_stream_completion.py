@@ -1,6 +1,8 @@
 """Gateway stream completion must not overtake queued response tokens."""
 import asyncio
+import io
 import json
+import threading
 
 import httpx
 import pytest
@@ -10,7 +12,8 @@ import web.app as web
 
 @pytest.mark.parametrize("parts", [["complete"], ["开始", "中间", "结束"], ["a" * 8192, "tail"]])
 @pytest.mark.parametrize("buffered", [True, False])
-def test_gateway_stream_preserves_every_token(tmp_path, monkeypatch, parts, buffered):
+@pytest.mark.parametrize("raw_failure", [False, True])
+def test_gateway_stream_preserves_every_token(tmp_path, monkeypatch, parts, buffered, raw_failure):
     monkeypatch.setattr(web, "SESSIONS_DIR", tmp_path / "sessions")
     monkeypatch.setattr(web, "DEBUG_DIR", tmp_path / "debug")
     monkeypatch.setattr(web, "SHARED_RAW_STREAM", tmp_path / "absent-raw.jsonl")
@@ -33,6 +36,26 @@ def test_gateway_stream_preserves_every_token(tmp_path, monkeypatch, parts, buff
     events.append({"choices": [{"delta": {}, "finish_reason": "stop"}]})
     payload = "".join("data: " + json.dumps(event) + "\n\n" for event in events) + "data: [DONE]\n\n"
 
+    raw_failed = threading.Event()
+
+    if raw_failure:
+        original_open = open
+
+        class BrokenRawStream(io.StringIO):
+            def readline(self, *args):
+                raise UnicodeError("simulated raw log decoding failure")
+
+            def __exit__(self, *args):
+                raw_failed.set()
+                return super().__exit__(*args)
+
+        def open_log(path, *args, **kwargs):
+            if path == web.SHARED_RAW_STREAM:
+                return BrokenRawStream()
+            return original_open(path, *args, **kwargs)
+
+        monkeypatch.setattr(web, "open", open_log, raising=False)
+
     class Chunks(httpx.AsyncByteStream):
         async def __aiter__(self):
             for block in payload.split("\n\n"):
@@ -40,10 +63,18 @@ def test_gateway_stream_preserves_every_token(tmp_path, monkeypatch, parts, buff
                 yield (block + "\n\n").encode()
 
     client_class = httpx.AsyncClient
+
+    async def gateway_response(request):
+        if raw_failure:
+            # Release the HTTP response only after the auxiliary reader fails.
+            # No wall-clock sleep: the worker signals the exact fault boundary.
+            assert await asyncio.to_thread(raw_failed.wait, 2)
+            await asyncio.sleep(0)
+        return (httpx.Response(200, text=payload) if buffered
+                else httpx.Response(200, stream=Chunks()))
+
     monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: client_class(
-        transport=httpx.MockTransport(lambda request: (
-            httpx.Response(200, text=payload) if buffered
-            else httpx.Response(200, stream=Chunks()))),
+        transport=httpx.MockTransport(gateway_response),
         **kwargs))
 
     async def scenario():
