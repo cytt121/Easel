@@ -3159,11 +3159,16 @@ async def api_chat_job_stream(turn_id: str, after: int = 0):
     # A stale browser-side pendingTurnId must fail promptly instead of receiving
     # heartbeats forever. The frontend can then recover from the final snapshot.
     if not _job_event_file(turn_id).is_file():
-        raise HTTPException(404, "对话任务记录不存在或已失效")
+        # Admission can commit before the supervisor creates its event log.
+        # A missing log does not authorize resubmission of an admitted request.
+        status = await api_chat_job_status(turn_id)
+        if status["tracking"] != "persisted":
+            raise HTTPException(404, "对话任务记录不存在或已失效")
 
     async def events():
         cursor = max(0, after)
         idle_since = time.monotonic()
+        checked_at = 0.0
         while True:
             batch = _read_job_events(turn_id, cursor)
             if batch:
@@ -3188,6 +3193,35 @@ async def api_chat_job_stream(turn_id: str, after: int = 0):
                     if event["event"] in ("done", "error"):
                         return
             else:
+                # A crash may occur after terminal commit but before the done
+                # event. Inspect metadata only after draining the event log.
+                if time.monotonic() - checked_at >= 1:
+                    checked_at = time.monotonic()
+                    try:
+                        status = await api_chat_job_status(turn_id)
+                    except HTTPException as error:
+                        if error.status_code != 404:
+                            yield {"event": "error", "data": json.dumps(
+                                "任务状态暂不可读取；请保留已有结果并稍后核验，不会自动重试", ensure_ascii=False)}
+                            return
+                    else:
+                        if status["tracking"] == "persisted" and status["state"] not in ("queued", "running"):
+                            if status["state"] == "succeeded":
+                                if cursor == 0:
+                                    saved = await api_chat_last(status["session_id"], turn_id)
+                                    if saved.get("status") == "done" and saved.get("text"):
+                                        yield {"event": "token", "data": json.dumps(saved["text"], ensure_ascii=False)}
+                                    else:
+                                        yield {"event": "error", "data": json.dumps(
+                                            "任务已结束，但没有可恢复的完整结果；请检查已保存的产物", ensure_ascii=False)}
+                                        return
+                                yield {"event": "done", "data": json.dumps({"sessionKey": status["session_id"]})}
+                            else:
+                                note = {"unknown": "执行结果未知，请核验已有结果；不会自动重试",
+                                        "cancelled": "任务已取消", "failed": "任务执行失败",
+                                        "interrupted": "任务已中断"}[status["state"]]
+                                yield {"event": "error", "data": json.dumps(note, ensure_ascii=False)}
+                            return
                 # Keep proxy connections active; reconnecting remains safe if it still drops.
                 if time.monotonic() - idle_since >= 15:
                     yield {"event": "ping", "data": "{}"}
@@ -3221,6 +3255,29 @@ async def api_chat_job_status(turn_id: str):
 
 class ReconcileChatRunRequest(BaseModel):
     expected_version: StrictInt = Field(gt=0)
+
+
+@app.post("/api/chat/jobs/{turn_id}/cancel-queued")
+async def api_chat_job_cancel_queued(turn_id: str, req: ReconcileChatRunRequest):
+    """Withdraw a queued admission, including one left behind by a restart.
+
+    The CAS races the executor's queued->running CAS. Only one may win; a
+    waiting executor cannot dispatch after its admission has been cancelled.
+    This is an explicit cancellation, never an inference about worker death.
+    """
+    status = await api_chat_job_status(turn_id)
+    if (status["tracking"] != "persisted" or status["backend"] != "direct_api"
+            or status["state"] != "queued" or status["version"] != req.expected_version):
+        raise HTTPException(409, "任务已变化或不支持取消排队，请重新读取状态")
+    try:
+        record = await durable_call(lambda: RunStore(SESSIONS_DIR / "runs.sqlite3").transition(
+            turn_id, expected_version=req.expected_version, state="cancelled"))
+    except RunConflict:
+        raise HTTPException(409, "任务已开始或状态已变化，未取消执行") from None
+    except (OSError, sqlite3.Error, UnsupportedSchema):
+        raise HTTPException(503, "取消排队未完成，请重新读取状态") from None
+    return {**asdict(record), "tracking": "persisted", "live_status": "not_checked",
+            "can_resume": False}
 
 
 @app.post("/api/chat/jobs/{turn_id}/reconcile")
