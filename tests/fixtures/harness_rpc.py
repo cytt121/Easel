@@ -11,6 +11,7 @@ audit = os.environ["FAKE_HARNESS_AUDIT"]
 thread_id = "native-thread"
 turn_id = "native-turn"
 session_id = "native-session"
+pending_prompt = None
 
 
 def send(message):
@@ -77,12 +78,19 @@ while True:
     elif method == "session/set_config_option":
         reply(message, {})
     elif method in ("turn/interrupt", "session/cancel"):
+        if method == "session/cancel" and pending_prompt is not None and mode != "ignore-cancel":
+            if mode == "slow-cancel":
+                time.sleep(0.3)
+            with open(audit, "a", encoding="utf-8") as stream:
+                stream.write(json.dumps({"method": "fixture/cancel-completed"}) + "\n")
+            reply(pending_prompt, {"stopReason": "cancelled"})
         if "id" in message:
             reply(message, {})
     elif method in ("turn/start", "session/prompt"):
         if mode == "permission":
             permission()
-        if mode == "hang":
+        if mode in ("hang", "slow-cancel", "ignore-cancel"):
+            pending_prompt = message
             if runtime == "codex":
                 reply(message, {"turn": {"id": turn_id}})
             continue

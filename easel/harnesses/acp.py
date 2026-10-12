@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 
 from easel import __version__
+from easel.timeouts import TIMEOUT_HARNESS_CANCEL
 
 from .base import Descriptor, HarnessError, RunRequest
 from .workspace import harness_instructions
@@ -89,19 +90,29 @@ class ACPAdapter:
                     raise HarnessError("此 ACP Agent 未提供模型切换能力，请清空覆盖值使用原生配置")
             active = True
             prompt = harness_instructions(request) + "\n\n" + request.prompt
+            pending = asyncio.create_task(rpc.call("session/prompt", {
+                "sessionId": session_id, "prompt": [{"type": "text", "text": prompt}]},
+                timeout=request.timeout))
             try:
-                result = await rpc.call("session/prompt", {
-                    "sessionId": session_id, "prompt": [{"type": "text", "text": prompt}]},
-                    timeout=request.timeout)
+                # Keep the original response alive: ACP v1 acknowledges cancel
+                # by resolving session/prompt, not by replying to session/cancel.
+                result = await asyncio.shield(pending)
                 if result.get("stopReason") != "end_turn":
                     raise HarnessError(f"Agent 本轮未正常完成：{result.get('stopReason', 'unknown')}")
             except asyncio.CancelledError:
-                try:
+                async def cancel_and_wait():
                     await rpc.send({"method": "session/cancel", "params": {"sessionId": session_id}})
-                    await asyncio.sleep(0.1)
-                except HarnessError:
+                    await asyncio.shield(pending)
+                try:
+                    await asyncio.wait_for(cancel_and_wait(), TIMEOUT_HARNESS_CANCEL)
+                except (HarnessError, asyncio.TimeoutError):
                     pass
                 raise
+            finally:
+                active = False
+                if not pending.done():
+                    pending.cancel()
+                await asyncio.gather(pending, return_exceptions=True)
 
 
 class OpenCodeAdapter(ACPAdapter):

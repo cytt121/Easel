@@ -423,18 +423,52 @@ def test_cancel_interrupts_native_turn(tmp_path, runtime, adapter, cancel_method
             raise AssertionError
         task = asyncio.create_task(adapter().run(request_for(tmp_path, runtime, "hang"),
                                                 lambda *args: None, reject, lambda identifier: None))
-        for attempt in range(100):
+        deadline = asyncio.get_running_loop().time() + 10
+        while asyncio.get_running_loop().time() < deadline:
             await asyncio.sleep(0.02)
             path = tmp_path / "audit.jsonl"
             if path.exists() and any(message.get("method") in ("turn/start", "session/prompt") for message in audit(tmp_path)):
                 break
-        await asyncio.sleep(0.05)
+        else:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            pytest.fail("native turn did not start before cancellation test deadline")
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
 
     asyncio.run(exercise())
     assert any(message.get("method") == cancel_method for message in audit(tmp_path))
+
+
+@pytest.mark.parametrize("mode", ["slow-cancel", "ignore-cancel"])
+def test_acp_cancellation_waits_for_response_but_has_a_deadline(tmp_path, mode):
+    async def exercise():
+        async def reject(questions):
+            raise AssertionError("unexpected permission request")
+        task = asyncio.create_task(ACPAdapter().run(request_for(tmp_path, "acp", mode),
+                                   lambda *args: None, reject, lambda identifier: None))
+        try:
+            deadline = asyncio.get_running_loop().time() + 10
+            while asyncio.get_running_loop().time() < deadline:
+                await asyncio.sleep(0.02)
+                path = tmp_path / "audit.jsonl"
+                if path.exists() and any(m.get("method") == "session/prompt" for m in audit(tmp_path)):
+                    break
+            else:
+                pytest.fail("ACP fixture did not start its prompt")
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, 8)
+        finally:
+            if not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+    asyncio.run(exercise())
+    methods = [message.get("method") for message in audit(tmp_path)]
+    assert methods.count("session/prompt") == 1
+    assert methods.count("session/cancel") == 1
+    assert ("fixture/cancel-completed" in methods) == (mode == "slow-cancel")
 
 
 def test_rpc_stderr_and_invalid_json(tmp_path):
