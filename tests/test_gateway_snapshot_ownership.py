@@ -1,9 +1,15 @@
 """A queued/rejected OpenClaw turn must not replace its session owner's snapshot."""
 import asyncio
+import subprocess
+import sys
 
 import pytest
 
 import web.app as web
+
+
+REAL_POPEN = subprocess.Popen
+REAL_CROSS_PROC_LOCK = web._CrossProcLock
 
 
 @pytest.fixture
@@ -118,3 +124,61 @@ def test_snapshot_writes_remain_inside_both_locks(sandbox, monkeypatch):
     asyncio.run(scenario())
     assert writes == [("running", True, True), ("done", True, True)]
     assert not sandbox.held
+
+
+def test_other_process_owner_survives_rejection_and_next_turn_can_start(sandbox, monkeypatch):
+    """Exercise real OS locks, not only the fake ownership boundary above."""
+    monkeypatch.setattr(web, "_CrossProcLock", REAL_CROSS_PROC_LOCK)
+    monkeypatch.setattr(web, "TIMEOUT_CHAT", 0)
+    script = """
+import sys
+from pathlib import Path
+import web.app as web
+web.SESSIONS_DIR = Path(sys.argv[1])
+lock = web._CrossProcLock('cross-process')
+try:
+    assert lock.acquire(0), 'child failed to acquire session lock'
+    print('locked', flush=True)
+    sys.stdin.readline()
+finally:
+    lock.release()
+"""
+    child = REAL_POPEN(
+        [sys.executable, "-u", "-c", script, str(web.SESSIONS_DIR)],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True,
+    )
+
+    async def scenario():
+        try:
+            ready = await asyncio.wait_for(asyncio.to_thread(child.stdout.readline), timeout=10)
+            assert ready.strip() == "locked"
+            web._save_turn("web:cross-process", "running", "owner result", {"turn_id": "owner"})
+            original = web._turn_file("web:cross-process").read_bytes()
+            response = await web.api_chat_stream(web.ChatRequest(
+                message="blocked", sessionId="cross-process", turnId="blocked"))
+            events = await collect(response)
+            assert any(event["event"] == "error" for event in events)
+            assert web._turn_file("web:cross-process").read_bytes() == original
+            assert child.poll() is None
+            assert not web._session_lock("cross-process").locked()
+
+            child.stdin.write("release\n")
+            child.stdin.flush()
+            assert await asyncio.to_thread(child.wait, timeout=5) == 0
+            # With the real owner gone, the next turn must acquire the same
+            # session and reach the simulated CLI startup failure normally.
+            response = await web.api_chat_stream(web.ChatRequest(
+                message="next", sessionId="cross-process", turnId="next"))
+            await collect(response)
+            snapshot = await web.api_chat_last("cross-process", turn_id="next")
+            assert snapshot["stop_reason"] == "spawn_failed"
+            assert not web._session_lock("cross-process").locked()
+        finally:
+            if child.poll() is None:
+                child.kill()
+            await asyncio.to_thread(child.wait, timeout=5)
+            for pipe in (child.stdin, child.stdout, child.stderr):
+                pipe.close()
+
+    asyncio.run(scenario())
