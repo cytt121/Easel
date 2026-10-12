@@ -10,6 +10,7 @@ import web.app as web
 
 REAL_POPEN = subprocess.Popen
 REAL_CROSS_PROC_LOCK = web._CrossProcLock
+REAL_RESOLVE_TRANSPORT = web._resolve_transport
 
 
 @pytest.fixture
@@ -124,6 +125,31 @@ def test_snapshot_writes_remain_inside_both_locks(sandbox, monkeypatch):
     asyncio.run(scenario())
     assert writes == [("running", True, True), ("done", True, True)]
     assert not sandbox.held
+
+
+def test_invalid_transport_pin_finishes_turn_and_releases_ownership(sandbox, monkeypatch, tmp_path):
+    monkeypatch.setattr(web, "_resolve_transport", REAL_RESOLVE_TRANSPORT)
+    monkeypatch.setattr(web, "OPENCLAW_SESSIONS_DIR", tmp_path / "openclaw-sessions")
+    web.SESSIONS_DIR.mkdir(parents=True)
+    pin = web._transport_pin_file("broken-pin")
+    pin.write_bytes(b"\xff\xfe")
+
+    async def scenario():
+        response = await web.api_chat_stream(web.ChatRequest(
+            message="test", sessionId="broken-pin", turnId="broken-pin-turn"))
+        events = await collect(response)
+        assert any(event["event"] == "error" for event in events)
+        assert events[-1]["event"] == "done"
+        snapshot = await web.api_chat_last("broken-pin", turn_id="broken-pin-turn")
+        assert snapshot["status"] == "done"
+        assert snapshot["stop_reason"] == "spawn_failed"
+        assert not web._session_lock("broken-pin").locked()
+        assert not sandbox.held
+        # A damaged pin must not silently move an established HTTP session to
+        # the CLI's different transcript. Leave it intact and report failure.
+        assert pin.read_bytes() == b"\xff\xfe"
+
+    asyncio.run(scenario())
 
 
 def test_other_process_owner_survives_rejection_and_next_turn_can_start(sandbox, monkeypatch):

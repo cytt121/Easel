@@ -3101,26 +3101,28 @@ async def api_chat_stream(req: ChatRequest):
 
         # _resolve_transport 里既有 stat 又有阻塞 urllib 探针（最多 3s），必须丢线程：
         # 直接在协程里调会把整个事件循环——连同其它会话正在推的 SSE——一起卡住。
-        is_http = (await asyncio.to_thread(_resolve_transport, sk)) == "http"
-        if is_http:
-            # HTTP 直连常驻网关：无进程冷启动（agent 在 gateway 进程里跑）
-            proc = _GatewayHttpProc()
-        else:
-            try:
+        try:
+            is_http = (await asyncio.to_thread(_resolve_transport, sk)) == "http"
+            if is_http:
+                # HTTP 直连常驻网关：无进程冷启动（agent 在 gateway 进程里跑）
+                proc = _GatewayHttpProc()
+            else:
                 proc = subprocess.Popen(
                     cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                     cwd=str(PROJECT_ROOT), text=True, bufsize=1, env=env,
                 )
-            except BaseException:
-                _save_turn(pk, "done", "❌ 启动失败，请重试", {
-                    "turn_id": turn_id, "clean_end": False, "stop_reason": "spawn_failed",
-                })
-                xlock.release()
-                lock.release()
-                to_client("error", "❌ 启动失败，请重试")
-                to_client("done", sessionKey=sk)
-                client_q.put_nowait(CLIENT_DONE)
-                return
+        except Exception:
+            # Transport selection can also fail (for example a damaged pin).
+            # Finish the owned snapshot before allowing another turn to run.
+            _save_turn(pk, "done", "❌ 启动失败，请重试", {
+                "turn_id": turn_id, "clean_end": False, "stop_reason": "spawn_failed",
+            })
+            xlock.release()
+            lock.release()
+            to_client("error", "❌ 启动失败，请重试")
+            to_client("done", sessionKey=sk)
+            client_q.put_nowait(CLIENT_DONE)
+            return
         _RUNNING_CHAT[sk] = proc         # 注册运行中进程（HTTP 模式为伪进程），供 /api/chat/stop
         # 经 gateway 后客户端 stdout 没有 model-fetch 标记（那是独立跑 agent 才有），先立刻
         # 给一个「正在思考」活动指示，随后 token 从共享 raw stream 流进来接管显示。
