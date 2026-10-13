@@ -1,0 +1,118 @@
+[
+  {
+    "id": "event-log-damage",
+    "fault_stage": "event log truncation/corruption",
+    "expected": "replay surviving events and retry incomplete tail",
+    "forbidden_effect": "silently discard later terminal events",
+    "tests": [
+      "tests.test_chat_event_log_recovery::test_incomplete_tail_is_retried_after_append",
+      "tests.test_chat_event_log_recovery::test_replay_reaches_terminal_event_after_corrupt_record"
+    ]
+  },
+  {
+    "id": "stream-completion-order",
+    "fault_stage": "gateway completion races tokens",
+    "expected": "preserve every response token",
+    "forbidden_effect": "finish before buffered tokens are drained",
+    "tests": [
+      "tests.test_gateway_stream_completion::test_gateway_stream_preserves_every_token[False-True-parts0]",
+      "tests.test_gateway_stream_completion::test_gateway_stream_preserves_every_token[False-True-parts1]",
+      "tests.test_gateway_stream_completion::test_gateway_stream_preserves_every_token[False-True-parts2]",
+      "tests.test_gateway_stream_completion::test_gateway_stream_preserves_every_token[False-False-parts0]",
+      "tests.test_gateway_stream_completion::test_gateway_stream_preserves_every_token[False-False-parts1]",
+      "tests.test_gateway_stream_completion::test_gateway_stream_preserves_every_token[False-False-parts2]",
+      "tests.test_gateway_stream_completion::test_gateway_stream_preserves_every_token[True-True-parts0]",
+      "tests.test_gateway_stream_completion::test_gateway_stream_preserves_every_token[True-True-parts1]",
+      "tests.test_gateway_stream_completion::test_gateway_stream_preserves_every_token[True-True-parts2]",
+      "tests.test_gateway_stream_completion::test_gateway_stream_preserves_every_token[True-False-parts0]",
+      "tests.test_gateway_stream_completion::test_gateway_stream_preserves_every_token[True-False-parts1]",
+      "tests.test_gateway_stream_completion::test_gateway_stream_preserves_every_token[True-False-parts2]"
+    ]
+  },
+  {
+    "id": "snapshot-ownership",
+    "fault_stage": "competing turn and failed startup",
+    "expected": "preserve active owner snapshot and release only owned locks",
+    "forbidden_effect": "overwrite another turn result",
+    "tests": [
+      "tests.test_gateway_snapshot_ownership::test_queued_turn_preserves_owner_until_lock_acquired[running]",
+      "tests.test_gateway_snapshot_ownership::test_queued_turn_preserves_owner_until_lock_acquired[done]",
+      "tests.test_gateway_snapshot_ownership::test_cancelled_startup_releases_only_its_ownership[local_lock]",
+      "tests.test_gateway_snapshot_ownership::test_cancelled_startup_releases_only_its_ownership[process_lock]",
+      "tests.test_gateway_snapshot_ownership::test_cancelled_startup_releases_only_its_ownership[transport]"
+    ]
+  },
+  {
+    "id": "checkpoint-process-death",
+    "fault_stage": "process death before/after receipt commit",
+    "expected": "reuse only verified committed local artifacts",
+    "forbidden_effect": "reuse uncommitted or changed output",
+    "tests": [
+      "tests.test_artifact_checkpoints::test_process_death_releases_lock_and_only_committed_steps_are_reused[before-commit]",
+      "tests.test_artifact_checkpoints::test_process_death_releases_lock_and_only_committed_steps_are_reused[after-commit]",
+      "tests.test_artifact_checkpoints::test_reopen_reuses_output_but_input_or_artifact_change_recomputes"
+    ]
+  },
+  {
+    "id": "orphan-reconciliation",
+    "fault_stage": "owner process lost",
+    "expected": "mark uncertain outcome without replay",
+    "forbidden_effect": "repeat unknown external action",
+    "tests": [
+      "tests.test_chat_run_reconciliation::test_orphan_becomes_unknown_without_erasing_results_or_allowing_replay",
+      "tests.test_chat_run_reconciliation::test_real_process_lock_prevents_reconciliation_until_process_exits"
+    ]
+  },
+  {
+    "id": "queued-cancellation",
+    "fault_stage": "cancel races dispatch",
+    "expected": "exactly one admission winner",
+    "forbidden_effect": "dispatch a cancelled queued request",
+    "tests": [
+      "tests.test_cancel_queued_chat_runs::test_executor_and_canceller_have_exactly_one_winner",
+      "tests.test_cancel_queued_chat_runs::test_cancelled_waiter_never_dispatches_or_overwrites_owner_snapshot"
+    ]
+  },
+  {
+    "id": "terminal-replay",
+    "fault_stage": "missing terminal event",
+    "expected": "finish from saved state without reexecution",
+    "forbidden_effect": "duplicate execution or conflicting snapshot append",
+    "tests": [
+      "tests.test_persisted_chat_replay::test_drain_partial_log_then_finish_without_reexecuting[succeeded]",
+      "tests.test_persisted_chat_replay::test_drain_partial_log_then_finish_without_reexecuting[failed]",
+      "tests.test_persisted_chat_replay::test_drain_partial_log_then_finish_without_reexecuting[cancelled]",
+      "tests.test_persisted_chat_replay::test_drain_partial_log_then_finish_without_reexecuting[unknown]",
+      "tests.test_persisted_chat_replay::test_drain_partial_log_then_finish_without_reexecuting[interrupted]",
+      "tests.test_persisted_chat_replay::test_conflicting_snapshot_is_not_appended_to_existing_output"
+    ]
+  },
+  {
+    "id": "pending-permission-cancel",
+    "fault_stage": "cancel while waiting for permission",
+    "expected": "reply cancelled and clean UI wait",
+    "forbidden_effect": "grant permission after cancellation wins",
+    "tests": [
+      "tests.test_agent_harnesses::test_acp_cancels_pending_permission_without_granting_tools[False]",
+      "tests.test_agent_harnesses::test_acp_cancels_pending_permission_without_granting_tools[True]"
+    ]
+  },
+  {
+    "id": "client-request-pressure",
+    "fault_stage": "native client request overload",
+    "expected": "reject overload and reclaim capacity",
+    "forbidden_effect": "unbounded outstanding callbacks",
+    "tests": [
+      "tests.test_rpc_client_pressure::test_overload_fails_waiter_and_cleans_pending_callbacks[False-False-False]",
+      "tests.test_rpc_client_pressure::test_overload_fails_waiter_and_cleans_pending_callbacks[False-False-True]",
+      "tests.test_rpc_client_pressure::test_overload_fails_waiter_and_cleans_pending_callbacks[False-True-False]",
+      "tests.test_rpc_client_pressure::test_overload_fails_waiter_and_cleans_pending_callbacks[False-True-True]",
+      "tests.test_rpc_client_pressure::test_overload_fails_waiter_and_cleans_pending_callbacks[True-False-False]",
+      "tests.test_rpc_client_pressure::test_overload_fails_waiter_and_cleans_pending_callbacks[True-False-True]",
+      "tests.test_rpc_client_pressure::test_overload_fails_waiter_and_cleans_pending_callbacks[True-True-False]",
+      "tests.test_rpc_client_pressure::test_overload_fails_waiter_and_cleans_pending_callbacks[True-True-True]",
+      "tests.test_rpc_client_pressure::test_completed_requests_release_capacity_across_batches[False]",
+      "tests.test_rpc_client_pressure::test_completed_requests_release_capacity_across_batches[True]"
+    ]
+  }
+]
