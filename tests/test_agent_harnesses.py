@@ -417,8 +417,16 @@ def test_acp_cannot_silently_replace_unsupported_history(tmp_path):
 
 @pytest.mark.parametrize("runtime,adapter,cancel_method", [
     ("codex", CodexAdapter, "turn/interrupt"), ("acp", ACPAdapter, "session/cancel")])
-def test_cancel_interrupts_native_turn(tmp_path, runtime, adapter, cancel_method):
+def test_cancel_interrupts_native_turn(tmp_path, monkeypatch, runtime, adapter, cancel_method):
     async def exercise():
+        started = asyncio.Event()
+        original_call = RPC.call
+        async def call(self, method, *args, **kwargs):
+            result = await original_call(self, method, *args, **kwargs)
+            if method == "turn/start":
+                started.set()
+            return result
+        monkeypatch.setattr(RPC, "call", call)
         async def reject(questions):
             raise AssertionError
         task = asyncio.create_task(adapter().run(request_for(tmp_path, runtime, "hang"),
@@ -427,7 +435,9 @@ def test_cancel_interrupts_native_turn(tmp_path, runtime, adapter, cancel_method
         while asyncio.get_running_loop().time() < deadline:
             await asyncio.sleep(0.02)
             path = tmp_path / "audit.jsonl"
-            if path.exists() and any(message.get("method") in ("turn/start", "session/prompt") for message in audit(tmp_path)):
+            if ((runtime == "codex" and started.is_set())
+                    or (runtime == "acp" and path.exists()
+                        and any(message.get("method") == "session/prompt" for message in audit(tmp_path)))):
                 break
         else:
             task.cancel()
