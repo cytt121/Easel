@@ -28,12 +28,42 @@ SCENARIOS = (
         "tests": ["tests.test_agent_harnesses::test_pooled_connections_reject_concurrent_turn_and_clean_cancelled_process"],
     },
     {
+        "id": "idle-process-recovery", "fault_stage": "native process death between turns",
+        "expected": "resume the same native session in a new process",
+        "forbidden_effect": "duplicate prompt submissions or replace session identity",
+        "measurements_required": True,
+        "tests": ["tests.test_agent_fault_measurements::test_idle_process_death_recovery[codex]",
+                  "tests.test_agent_fault_measurements::test_idle_process_death_recovery[acp]"],
+    },
+    {
         "id": "native-fatal-event", "fault_stage": "fatal native protocol event",
         "expected": "surface the failure without waiting for the full turn timeout",
         "forbidden_effect": "report success or automatically repeat the prompt",
         "tests": ["tests.test_agent_harnesses::test_codex_fatal_event_does_not_wait_until_timeout"],
     },
 )
+
+
+def measurements(case):
+    values = [prop.get("value", "") for prop in case.findall("properties/property")
+              if prop.get("name") == "easel_fault_metrics"]
+    if not values:
+        return None
+    if len(values) != 1:
+        raise ValueError("Duplicate measurement record")
+    value = json.loads(values[0])
+    if not isinstance(value, dict) or set(value) != {
+            "prompt_submissions", "duplicate_prompt_submissions", "recovery_latency_seconds"}:
+        raise ValueError("Unexpected measurement fields")
+    for key in ("prompt_submissions", "duplicate_prompt_submissions"):
+        if type(value[key]) is not int or not 0 <= value[key] <= 1000000:
+            raise ValueError("Invalid counter")
+    elapsed = value["recovery_latency_seconds"]
+    if type(elapsed) not in (int, float) or not math.isfinite(elapsed) or not 0 <= elapsed <= 86400:
+        raise ValueError("Invalid recovery duration")
+    if value["duplicate_prompt_submissions"] > value["prompt_submissions"]:
+        raise ValueError("Inconsistent counters")
+    return value
 
 
 def report(source: bytes, *, revision: str | None = None) -> dict:
@@ -47,6 +77,7 @@ def report(source: bytes, *, revision: str | None = None) -> dict:
     if root.tag not in ("testsuite", "testsuites"):
         raise ValueError("Expected a JUnit testsuite or testsuites root")
     evidence: dict[str, list[tuple[str, float | None]]] = {}
+    measured = {}
     for case in root.iter("testcase"):
         key = f"{case.get('classname', '')}::{case.get('name', '')}"
         if not any(key in scenario["tests"] for scenario in SCENARIOS):
@@ -57,6 +88,7 @@ def report(source: bytes, *, revision: str | None = None) -> dict:
         status = next((state for tag, state in (("error", "error"), ("failure", "failed"),
                                                 ("skipped", "skipped")) if case.find(tag) is not None), "passed")
         evidence.setdefault(key, []).append((status, duration))
+        measured.setdefault(key, []).append(measurements(case))
     scenarios = []
     for definition in SCENARIOS:
         missing = [key for key in definition["tests"] if key not in evidence]
@@ -65,10 +97,18 @@ def report(source: bytes, *, revision: str | None = None) -> dict:
                   for state in ("passed", "failed", "error", "skipped")}
         status = ("error" if counts["error"] else "failed" if counts["failed"] else
                   "not_run" if missing else "skipped" if counts["skipped"] else "passed")
+        samples = [{"test": key, **value} for key in definition["tests"]
+                   for value in measured.get(key, []) if value is not None]
+        if definition.get("measurements_required") and len(samples) != len(cases) and status == "passed":
+            status = "missing_measurements"
+        duration = sum(seconds for _, seconds in cases) if cases and all(
+            seconds is not None for _, seconds in cases) else None
+        if duration is not None and not math.isfinite(duration):
+            raise ValueError("Invalid aggregate duration")
         scenarios.append({**definition, "status": status, "case_counts": counts,
                           "missing_tests": missing,
-                          "test_duration_seconds": (round(sum(seconds for _, seconds in cases), 6)
-                                                    if cases and all(seconds is not None for _, seconds in cases) else None),
+                          "measurements": samples,
+                          "test_duration_seconds": round(duration, 6) if duration is not None else None,
                           "model_calls": None, "duplicate_external_effects": None,
                           "recovery_latency_seconds": None})
     return {"schema_version": 1, "kind": "deterministic_fault_regression",
