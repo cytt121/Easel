@@ -15,6 +15,8 @@ from .workspace import harness_instructions
 _POOLS: dict[asyncio.AbstractEventLoop, dict[tuple, dict]] = {}
 IDLE_SECONDS = 300
 MAX_IDLE_PROCESSES = 8
+# Bound outstanding reverse RPCs (permissions/questions), not tool executions.
+MAX_CLIENT_REQUESTS = 64
 
 
 async def close_sessions(session_key: str | None = None):
@@ -125,6 +127,7 @@ class RPC:
         self.stderr = None
         self.write_lock = asyncio.Lock()
         self.client_error = None
+        self.reader_error = None
         self.initialized = None
         self.native_id = ""
 
@@ -195,6 +198,9 @@ class RPC:
                     raise HarnessError("Agent 返回了无效 JSON-RPC 数据") from None
                 if "method" in message:
                     if "id" in message:
+                        self.tasks.difference_update([task for task in self.tasks if task.done()])
+                        if len(self.tasks) >= MAX_CLIENT_REQUESTS:
+                            raise HarnessError("Agent 客户端请求并发超过上限，本轮已终止")
                         task = asyncio.create_task(self._serve(message))
                         self.tasks.add(task)
                         task.add_done_callback(self.tasks.discard)
@@ -218,6 +224,7 @@ class RPC:
         except Exception as error:
             failure = error if isinstance(error, HarnessError) else HarnessError("Agent 协议读取失败")
         finally:
+            self.reader_error = failure
             for future in self.pending.values():
                 if not future.done():
                     future.set_exception(failure)
@@ -233,7 +240,7 @@ class RPC:
             if self.client_error:
                 raise self.client_error
             return result
-        raise HarnessError("Agent 在本轮完成前退出，请检查 CLI 登录与模型配置")
+        raise self.reader_error or HarnessError("Agent 在本轮完成前退出，请检查 CLI 登录与模型配置")
 
     async def __aexit__(self, *arguments):
         for task in self.tasks:
