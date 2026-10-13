@@ -31,3 +31,17 @@ JUnit properties 记录两次明确发起的 prompt 提交数、超出预期的�
 每个后端保留独立样本，不把少量样本平均成可靠性结论。测量字段缺失会产生
 `missing_measurements`，不能判为完整通过；非法计数和非有限数值拒绝生成报告。
 其他场景未测量的字段仍为 null，重复 prompt 不等于重复外部副作用。
+## 完整恢复回归集合
+
+默认 `--suite core` 检查四个原生协议场景。`--suite recovery` 在其上增加九个场景组：
+日志损坏/截断、流结束顺序、快照归属、检查点进程死亡、孤儿任务核对、排队取消、
+终态回放、待授权取消和客户端请求并发保护。清单固定每个所需参数化变体，不使用前缀模糊匹配。
+
+```bash
+python scripts/agent_fault_report.py agent-tests.xml --suite recovery --revision YOUR_TESTED_COMMIT > recovery-report.json
+```
+
+恢复集合用于包含对应功能分支的组合审计。前置功能未合入时，默认 CI 仍运行 core；
+主动选择 recovery 而缺少对应测试会明确失败为 not_run，不会跳过后假报完成。
+完整报告仅表示所选集合的登记断言和必要测量满足要求。它不表示未实现的严格调用预算已完成。
+工具临时错误分类/预算场景应随对应实现新增；通用失败自动重试不属于当前能力。
