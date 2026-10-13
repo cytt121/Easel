@@ -45,8 +45,12 @@ def permission():
                          "options": [{"optionId": "always", "name": "Always", "kind": "allow_always"},
                                      {"optionId": "once", "name": "Allow", "kind": "allow_once"},
                                      {"optionId": "deny", "name": "Reject", "kind": "reject_once"}]}})
-    while receive().get("id") != "permission-request":
-        pass
+    cancelled = False
+    while True:
+        response = receive()
+        cancelled = cancelled or response.get("method") == "session/cancel"
+        if response.get("id") == "permission-request":
+            return response, cancelled
 
 
 while True:
@@ -87,6 +91,14 @@ while True:
         if "id" in message:
             reply(message, {})
     elif method in ("turn/start", "session/prompt"):
+        if mode == "cancel-permission":
+            response, cancelled = permission()
+            if response.get("result") != {"outcome": {"outcome": "cancelled"}}:
+                sys.exit(2)
+            while not cancelled:
+                cancelled = receive().get("method") == "session/cancel"
+            reply(message, {"stopReason": "cancelled"})
+            continue
         if mode == "permission":
             permission()
         if mode in ("hang", "slow-cancel", "ignore-cancel"):

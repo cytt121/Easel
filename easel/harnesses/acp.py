@@ -18,6 +18,7 @@ class ACPAdapter:
     async def run(self, request: RunRequest, emit, ask, bind):
         session_id = request.native_id
         active = False
+        cancelling = asyncio.Event()
 
         def notify(method, params):
             if not active or method != "session/update" or params.get("sessionId") != session_id:
@@ -35,6 +36,8 @@ class ACPAdapter:
         async def respond(method, params):
             if method != "session/request_permission" or params.get("sessionId") != session_id:
                 raise HarnessError("不支持的 ACP 客户端请求")
+            if cancelling.is_set():
+                return {"outcome": {"outcome": "cancelled"}}
             options = params.get("options") or []
             allowed = [option for option in options if option.get("kind") in ("allow_once", "reject_once")]
             if not allowed:
@@ -42,9 +45,24 @@ class ACPAdapter:
             labels = {f"{index + 1}. {option['name']}": option["optionId"]
                       for index, option in enumerate(allowed)}
             tool = params.get("toolCall") or {}
-            answers = await ask([{"questionId": "permission", "header": "执行授权",
+            answer = asyncio.create_task(ask([{"questionId": "permission", "header": "执行授权",
                                   "question": f"Agent 请求工具权限（仅本次）：{tool.get('title', '')}",
-                                  "options": [{"label": label} for label in labels]}])
+                                  "options": [{"label": label} for label in labels]}]))
+            stopped = asyncio.create_task(cancelling.wait())
+            try:
+                await asyncio.wait((answer, stopped), return_when=asyncio.FIRST_COMPLETED)
+                # Cancellation wins over a late UI response. No new grant may
+                # escape after cancellation has begun, even in the same tick.
+                if cancelling.is_set():
+                    return {"outcome": {"outcome": "cancelled"}}
+                answers = answer.result()
+            finally:
+                for pending_answer in (answer, stopped):
+                    if not pending_answer.done():
+                        pending_answer.cancel()
+                await asyncio.gather(answer, stopped, return_exceptions=True)
+            if cancelling.is_set():
+                return {"outcome": {"outcome": "cancelled"}}
             selected = answers.get("permission") or []
             if len(selected) != 1 or selected[0] not in labels:
                 return {"outcome": {"outcome": "cancelled"}}
@@ -100,6 +118,7 @@ class ACPAdapter:
                 if result.get("stopReason") != "end_turn":
                     raise HarnessError(f"Agent 本轮未正常完成：{result.get('stopReason', 'unknown')}")
             except asyncio.CancelledError:
+                cancelling.set()
                 async def cancel_and_wait():
                     await rpc.send({"method": "session/cancel", "params": {"sessionId": session_id}})
                     await asyncio.shield(pending)
