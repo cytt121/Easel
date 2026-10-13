@@ -134,14 +134,19 @@ def main(argv=None) -> int:
     parser.add_argument("--revision", help="revision label recorded by the test runner; not independently verified")
     parser.add_argument("--suite", choices=("core", "recovery"), default="core",
                         help="recovery also requires the pending recovery/governance regression cases")
+    parser.add_argument("--output", type=Path, help="write UTF-8 JSON after input validation")
     args = parser.parse_args(argv)
     try:
         with args.junit.open("rb") as handle:
             payload = report(handle.read(32 * 1024 * 1024 + 1), revision=args.revision, suite=args.suite)
+        rendered = json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False)
+        if args.output:
+            args.output.write_text(rendered + "\n", encoding="utf-8")
     except (OSError, ValueError, ET.ParseError):
         print("Cannot read a supported, valid JUnit report; preserve the original evidence.", file=sys.stderr)
         return 2
-    print(json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False))
+    if not args.output:
+        print(rendered)
     return 0 if payload["complete"] else 1
 
 

@@ -155,3 +155,15 @@ def test_cli_status_agrees_with_its_report(tmp_path, complete, expected):
     result = subprocess.run([sys.executable, str(SCRIPT), str(source), "--revision", "abc"], capture_output=True, text=True)
     assert result.returncode == expected
     assert json.loads(result.stdout)["complete"] is complete
+
+
+@pytest.mark.parametrize("source,code", [(b"broken", 2), (b"<testsuites/>", 1)])
+def test_output_file_is_written_only_for_valid_input(tmp_path, source, code):
+    junit, output = tmp_path / "in.xml", tmp_path / "out.json"
+    junit.write_bytes(source)
+    result = subprocess.run([sys.executable, str(SCRIPT), str(junit), "--output", str(output)],
+                            capture_output=True, text=True)
+    assert result.returncode == code and not result.stdout
+    assert output.exists() == (code == 1)
+    if output.exists():
+        assert json.loads(output.read_text(encoding="utf-8"))["complete"] is False
