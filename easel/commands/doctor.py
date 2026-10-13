@@ -259,6 +259,53 @@ def _primary_model_routable() -> tuple[bool, str]:
     return True, ""
 
 
+def _tool_loop_policy() -> list[str]:
+    """Describe saved switches only; do not infer runtime support or defaults."""
+    try:
+        cfg = json.loads(_openclaw_config_path().read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        return ["无法读取 JSON 配置；循环保护状态未知"]
+    if not isinstance(cfg, dict):
+        return ["配置根节点不是对象；循环保护状态未知"]
+
+    def switch(scope):
+        if not isinstance(scope, dict):
+            return "格式异常"
+        for key in ("tools", "loopDetection"):
+            if key not in scope:
+                return "未设置"
+            scope = scope[key]
+            if not isinstance(scope, dict):
+                return "格式异常"
+        if "enabled" not in scope:
+            return "未设置"
+        value = scope["enabled"]
+        if type(value) is not bool:
+            return "格式异常"
+        return "显式开启" if value else "显式关闭"
+
+    lines = [f"tools.loopDetection.enabled：{switch(cfg)}"]
+    agents = cfg.get("agents", {})
+    if not isinstance(agents, dict):
+        return lines + ["agents 格式异常；无法检查 Agent 覆盖"]
+    # Both saved layouts exist in supported-era OpenClaw releases. Inspect
+    # separately; do not guess which one a running gateway actually consumes.
+    for layout, expected in (("list", list), ("entries", dict)):
+        if layout not in agents:
+            continue
+        entries = agents[layout]
+        if not isinstance(entries, expected):
+            lines.append(f"agents.{layout} 格式异常；无法检查 Agent 覆盖")
+            continue
+        states = [switch(entry) for entry in (entries.values() if layout == "entries" else entries)]
+        counts = "，".join(f"{state} {states.count(state)}" for state in
+                           ("显式开启", "显式关闭", "未设置", "格式异常"))
+        lines.append(f"agents.{layout} 的 Agent 开关：{counts}")
+    if "list" in agents and "entries" in agents:
+        lines.append("同时存在 list / entries；请用所装 OpenClaw 版本核对配置布局")
+    return lines
+
+
 def cmd_doctor(_args) -> int:
     print("Easel — 环境检查\n")
     all_ok = True
@@ -346,6 +393,11 @@ def cmd_doctor(_args) -> int:
         pass
 
     if not direct:
+        print("  OpenClaw 循环保护（只读配置诊断，不计入环境就绪结果）")
+        for line in _tool_loop_policy():
+            print(f"    └─ {line}")
+        print("    未设置不等于关闭；继承、默认值和运行时支持由 OpenClaw 版本决定。")
+        print("    已保存配置不证明网关已加载，也不代表每任务工具调用预算。")
         # .env 填了 ≠ setup 真的把 provider 写进了 openclaw；不对账就会「doctor 全绿但对话报错」。
         route_ok, route_detail = _primary_model_routable()
         all_ok &= _check("OpenClaw model routing", route_ok, route_detail)
