@@ -471,6 +471,39 @@ def test_acp_cancellation_waits_for_response_but_has_a_deadline(tmp_path, mode):
     assert ("fixture/cancel-completed" in methods) == (mode == "slow-cancel")
 
 
+@pytest.mark.parametrize("late_answer", [False, True])
+def test_acp_cancels_pending_permission_without_granting_tools(tmp_path, late_answer):
+    async def exercise():
+        entered, answered, cleaned = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        async def ask(questions):
+            entered.set()
+            try:
+                await answered.wait()
+                return {"permission": ["1. Allow"]}
+            finally:
+                cleaned.set()
+        task = asyncio.create_task(ACPAdapter().run(
+            request_for(tmp_path, "acp", "cancel-permission"),
+            lambda *args: None, ask, lambda identifier: None))
+        try:
+            await asyncio.wait_for(entered.wait(), 10)
+            task.cancel()
+            if late_answer:
+                answered.set()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, 8)
+            assert cleaned.is_set()
+        finally:
+            if not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+    asyncio.run(exercise())
+    responses = [message for message in audit(tmp_path) if message.get("id") == "permission-request"]
+    assert len(responses) == 1
+    assert responses[0]["result"] == {"outcome": {"outcome": "cancelled"}}
+    assert sum(message.get("method") == "session/prompt" for message in audit(tmp_path)) == 1
+
+
 def test_rpc_stderr_and_invalid_json(tmp_path):
     async def exercise():
         async def reject(*args):
