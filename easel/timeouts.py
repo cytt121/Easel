@@ -9,6 +9,7 @@
 """
 
 TIMEOUT_HARNESS_CANCEL = 2      # 协议取消收尾预算，超时后仍清理本机进程树
+TIMEOUT_MODEL_TOOL_PROBE = 60   # 显式启用的模型工具协议探测：两轮请求共享总时限
 
 TIMEOUT_PRODUCE = 7200   # 制作层：生视频 / 多镜合成给足时间
 TIMEOUT_DIRECT = 300     # 轻量直接执行层
