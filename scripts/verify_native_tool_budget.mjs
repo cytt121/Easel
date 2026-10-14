@@ -152,7 +152,9 @@ export default {id:'easel-budget-fixture',register(api){api.registerTool(ctx=>({
   // Startup phase names are useful on slow CI hosts and contain no config/input.
   console.error(JSON.stringify({ startupPhases: readLog().split('\n')
     .map(line => line.match(/startup phase: ([a-zA-Z0-9_.-]+)( starting)?/)?.[0])
-    .filter(Boolean).slice(-12), gatewayReady: readLog().includes('[gateway] ready') }));
+    .filter(Boolean).slice(-12), gatewayReady: readLog().includes('[gateway] ready'),
+    requests, budgetEvents: events(), fixtureFailed: Boolean(fixtureError),
+    errorTypes: readLog().split('\n').map(line => line.match(/errorName=([a-zA-Z0-9_.-]+)/)?.[1]).filter(Boolean) }));
   throw error;
 } finally {
   if (child && child.exitCode === null) {
