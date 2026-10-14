@@ -6,6 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { stripVTControlCharacters } from 'node:util';
 
 const runtime = path.resolve(process.argv[2] ?? 'node_modules/openclaw');
 const toolSearch = process.argv.includes('--tool-search');
@@ -21,12 +22,13 @@ const effectsPath = path.join(root, 'effects.jsonl');
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function until(predicate, timeout = 30000) {
   const end = performance.now() + timeout;
-  while (!predicate()) {
+  while (!await predicate()) {
     if (performance.now() >= end) throw new Error('Native acceptance condition timed out');
     await sleep(50);
   }
 }
-const events = () => (fs.existsSync(logPath) ? fs.readFileSync(logPath, 'utf8') : '').split('\n')
+const readLog = () => stripVTControlCharacters(fs.existsSync(logPath) ? fs.readFileSync(logPath, 'utf8') : '');
+const events = () => readLog().split('\n')
   .filter(line => line.includes('[plugins] {"event":"easel_budget_'))
   .map(line => JSON.parse(line.slice(line.indexOf('{"event"'))));
 const stopped = reason => events().some(event => event.event === 'easel_budget_stop' &&
@@ -88,7 +90,8 @@ export default {id:'easel-budget-fixture',register(api){api.registerTool(ctx=>({
   await new Promise(resolve => portProbe.listen(0, '127.0.0.1', resolve));
   const port = portProbe.address().port;
   await new Promise(resolve => portProbe.close(resolve));
-  const config = { gateway: { mode: 'local', port, bind: 'loopback',
+  const config = { logging: { consoleStyle: 'pretty', consoleLevel: 'info', file: path.join(root, 'structured.log') },
+  gateway: { mode: 'local', port, bind: 'loopback',
     auth: { mode: 'token', token: 'easel-local-fixture-token' }, controlUi: { enabled: false } },
   agents: { defaults: { model: { primary: 'fixture/fixture' }, workspace: path.join(root, 'workspace'),
     skipBootstrap: true, timeoutSeconds: 40, maxConcurrent: 4 } },
@@ -106,15 +109,19 @@ export default {id:'easel-budget-fixture',register(api){api.registerTool(ctx=>({
   process.env.OPENCLAW_STATE_DIR = root;
   process.env.OPENCLAW_CONFIG_PATH = path.join(root, 'openclaw.json');
   process.env.OPENCLAW_NO_RESPAWN = '1';
+  process.env.FORCE_COLOR = '0';
   output = fs.openSync(logPath, 'w');
   child = spawn(process.execPath, [path.join(runtime, 'openclaw.mjs'), 'gateway', 'run'],
     { env: process.env, stdio: ['ignore', output, output], windowsHide: true });
   let startupError;
   child.on('error', error => { startupError = error; });
-  await until(() => {
+  await until(async () => {
     if (startupError) throw startupError;
     if (child.exitCode !== null) throw new Error(`Gateway exited: ${child.exitCode}`);
-    return fs.readFileSync(logPath, 'utf8').includes('[gateway] ready');
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/readyz`, { signal: AbortSignal.timeout(1000) });
+      return response.ok;
+    } catch { return false; }
   }, 120000);
   const { callGatewayFromCli } = await import(pathToFileURL(path.join(runtime, 'dist/plugin-sdk/gateway-runtime.js')));
   const send = label => callGatewayFromCli('chat.send', { timeout: '20000', json: true }, {
@@ -142,6 +149,10 @@ export default {id:'easel-budget-fixture',register(api){api.registerTool(ctx=>({
     callStopConfirmed: true, deadlineStopConfirmed: true, concurrentRunCompleted: true, modelRequests: requests }));
 } catch (error) {
   console.error(`Native budget acceptance failed; isolated diagnostics: ${root}`);
+  // Startup phase names are useful on slow CI hosts and contain no config/input.
+  console.error(JSON.stringify({ startupPhases: readLog().split('\n')
+    .map(line => line.match(/startup phase: ([a-zA-Z0-9_.-]+)( starting)?/)?.[0])
+    .filter(Boolean).slice(-12), gatewayReady: readLog().includes('[gateway] ready') }));
   throw error;
 } finally {
   if (child && child.exitCode === null) {
