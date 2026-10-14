@@ -1,0 +1,92 @@
+# Native tool budgets (opt in)
+
+This plugin adds a per-run admission limit to the OpenClaw embedded agent used by
+Easel. The limit is reserved synchronously **before** a tool executes. Failed
+tools and later policy vetoes consume their reservation. A monotonic deadline
+also runs while the model is thinking. Retries with the same run identity cannot
+reset either limit.
+
+The plugin is optional; installing Easel does not enable it or alter existing
+OpenClaw settings. It does not cover Codex or ACP backends, CLI child processes,
+or external side effects performed inside one admitted tool.
+
+## Configuration
+
+The native integration is tested against **OpenClaw 2026.10.2, Node 24.19**.
+Use the same OpenClaw version for the CLI and gateway. Other versions and
+alternative harnesses need their own acceptance run before enabling protection.
+
+Merge the following entries into the existing **Easel profile** configuration
+(normally `~/.openclaw-easel/openclaw.json`). Replace the path with the absolute
+path to this directory. Preserve existing plugin allow entries, paths, and
+configuration; do not replace the entire config with this fragment.
+
+```json
+{
+  "plugins": {
+    "allow": ["easel-tool-budget"],
+    "load": { "paths": ["/absolute/path/to/Easel/agents/tool-budget"] },
+    "entries": {
+      "easel-tool-budget": {
+        "enabled": true,
+        "hooks": { "allowConversationAccess": true },
+        "config": { "maxCalls": 40, "timeoutMs": 120000 }
+      }
+    }
+  }
+}
+```
+
+`maxCalls` must be an integer from 0 to 10000; `timeoutMs` must be an integer
+from 1 to 3600000. There are no implicit unlimited defaults. Missing/invalid
+run or call identities deny execution. Lifecycle hooks need OpenClaw's
+`allowConversationAccess` setting; this plugin does not read or log messages,
+tool parameters, or results. Without that setting, OpenClaw blocks those hooks
+and every attempted tool is denied because its run was never admitted.
+
+After saving, restart the Easel gateway and inspect the **same profile**:
+
+```sh
+openclaw --profile easel plugins inspect easel-tool-budget --runtime --json
+```
+
+Verify status `loaded`, no hook-blocking diagnostics, and all four typed hooks:
+`before_agent_run`, `before_tool_call`, `after_tool_call`, and `agent_end`.
+An enabled entry alone does not prove runtime enforcement. Keep the gateway's
+own run timeout enabled as a separate bound.
+
+## Stop semantics and limits
+
+Admission closes immediately when a limit is exceeded. A separate, bounded
+`chat.abort` request targets the exact agent, session, and run, with
+`preserveSideRuns: true`. It never retries against a whole session. Only a reply
+confirming that exact run is reported as `stopStatus: confirmed`; transport
+errors, identity mismatches, and already-ended runs are `unconfirmed`.
+An unconfirmed stop still denies further tools, but cannot guarantee that the
+model has stopped. The logs distinguish these outcomes rather than reporting a
+successful cancellation. An already-running tool may finish after the deadline;
+the plugin cannot roll back its effects or forcibly terminate arbitrary tools.
+
+The plugin logs aggregate admitted/pending/succeeded/failed/rejected counts and
+the stop reason. It keeps at most 10000 run records per gateway process and
+refuses new runs once full. Completed call identities are discarded after their
+results settle. Retained run records prevent delayed callbacks from reopening
+completed runs. Restart the gateway after draining active work to clear the
+registry. Budgets are not durable across a gateway restart or plugin reload;
+the plugin is not a crash-recovery or exactly-once mechanism.
+
+Do not hot-reload the plugin during active work. Resumed/recovered native runs
+may have identities that cannot be cancelled through the original chat request;
+their abort result remains unconfirmed. These limitations must be considered
+before enabling the plugin on an existing long-running gateway.
+
+## Local checks
+
+```sh
+node --test tests/frontend/toolBudget.test.mjs tests/frontend/toolBudgetHooks.test.mjs
+```
+
+The core and hook-adapter tests require no model, credentials, network, or
+OpenClaw installation. They cover concurrent reservations, failed calls,
+deadline boundaries, identity errors, cancellation failure, late callbacks,
+and registry exhaustion. They do not substitute for native gateway acceptance.
