@@ -15,7 +15,9 @@ const expectedEffects = toolSearch ? 1 : 2;
 const version = JSON.parse(fs.readFileSync(path.join(runtime, 'package.json'), 'utf8')).version;
 assert.equal(version, '2026.10.2', 'Use the pinned acceptance runtime; revalidate other versions separately');
 const plugin = fileURLToPath(new URL('../agents/tool-budget', import.meta.url));
-const root = fs.mkdtempSync(path.join(os.tmpdir(), 'easel-budget-'));
+// Windows hosted runners expose an 8.3 TEMP path. The native transcript store
+// compares canonical ownership paths, so pass it the resolved directory.
+const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'easel-budget-')));
 const fixture = path.join(root, 'fixture');
 const logPath = path.join(root, 'gateway.log');
 const effectsPath = path.join(root, 'effects.jsonl');
@@ -154,7 +156,9 @@ export default {id:'easel-budget-fixture',register(api){api.registerTool(ctx=>({
     .map(line => line.match(/startup phase: ([a-zA-Z0-9_.-]+)( starting)?/)?.[0])
     .filter(Boolean).slice(-12), gatewayReady: readLog().includes('[gateway] ready'),
     requests, budgetEvents: events(), fixtureFailed: Boolean(fixtureError),
-    errorTypes: readLog().split('\n').map(line => line.match(/errorName=([a-zA-Z0-9_.-]+)/)?.[1]).filter(Boolean) }));
+    // Only extract errors from this fixture's isolated gateway, not raw logs.
+    gatewayErrors: readLog().split('\n').map(line => line.match(/error="(.*?)" errorName=/)?.[1])
+      .filter(Boolean).slice(-4).map(message => message.slice(0, 800)) }));
   throw error;
 } finally {
   if (child && child.exitCode === null) {
