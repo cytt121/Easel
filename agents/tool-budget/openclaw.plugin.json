@@ -8,7 +8,8 @@
     "required": ["maxCalls", "timeoutMs"],
     "properties": {
       "maxCalls": {"type": "integer", "minimum": 0, "maximum": 10000},
-      "timeoutMs": {"type": "integer", "minimum": 1, "maximum": 3600000}
+      "timeoutMs": {"type": "integer", "minimum": 1, "maximum": 3600000},
+      "stateFile": {"type": "string", "minLength": 1, "description": "Absolute path to an explicitly initialized durable budget database"}
     }
   }
 }

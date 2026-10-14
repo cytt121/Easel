@@ -4,7 +4,8 @@ This plugin adds a per-run admission limit to the OpenClaw embedded agent used b
 Easel. The limit is reserved synchronously **before** a tool executes. Failed
 tools and later policy vetoes consume their reservation. A monotonic deadline
 also runs while the model is thinking. Retries with the same run identity cannot
-reset either limit.
+reset either limit within the process. Optional durable reservations retain the
+same run identity's quota and original deadline across restarts.
 
 The unit of admission is a native `before_tool_call` invocation. Tool Search
 dispatchers and their target tools each consume a reservation; a budget of two
@@ -77,19 +78,50 @@ The plugin logs aggregate admitted/pending/succeeded/failed/rejected counts and
 the stop reason. It keeps at most 10000 run records per gateway process and
 refuses new runs once full. Completed call identities are discarded after their
 results settle. Retained run records prevent delayed callbacks from reopening
-completed runs. Restart the gateway after draining active work to clear the
-registry. Budgets are not durable across a gateway restart or plugin reload;
-the plugin is not a crash-recovery or exactly-once mechanism.
+completed runs. Restarting a drained gateway clears only the memory registry.
+Without `stateFile`, budgets do not survive restart; with it, the durable
+registry remains and still refuses new identities when full. Neither mode is
+an exactly-once mechanism. Logged counters describe this plugin instance, not
+the lifetime accounting in the persistent ledger.
 
 Do not hot-reload the plugin during active work. Resumed/recovered native runs
 may have identities that cannot be cancelled through the original chat request;
 their abort result remains unconfirmed. These limitations must be considered
 before enabling the plugin on an existing long-running gateway.
 
+## Optional durable reservations
+
+First initialize a dedicated database once, while no gateway uses it. Run this
+from the repository root with an absolute path in an existing private directory:
+
+```sh
+node --input-type=module -e "import { DurableToolStore } from './agents/tool-budget/durable-store.mjs'; new DurableToolStore('/absolute/path/budget.sqlite', {create: true}).close()"
+```
+
+Then add `"stateFile": "/absolute/path/budget.sqlite"` beside `maxCalls` and
+`timeoutMs` in this plugin's config. Keep that file across restarts. Runtime
+opening never creates a missing database: unavailable storage blocks both run
+admission and tools instead of falling back to memory. The existing no-file
+configuration remains explicitly in-memory.
+
+Each tool needs both a committed SQLite reservation and the in-process budget's
+approval. Failed tools, later policy vetoes and crashes after reservation do not
+refund calls. Reopening the same agent/session/run restores the remaining quota
+and deadline; changing policy for that identity closes it. The persisted wall
+clock includes downtime; a monotonic timer still bounds in-process thinking.
+Storage errors request a scoped stop but do not prove the model has stopped.
+
+This does not map changed native run IDs back to old budgets or automatically
+resume interrupted work. It assumes trustworthy local storage and system time;
+restoring old database backups or undetected clock adjustments are outside the
+guarantee. Do not delete/reset the ledger to clear capacity while old identities
+can return. See [ledger semantics](../../docs/durable-tool-reservations.md).
+
 ## Local checks
 
 ```sh
 node --test tests/frontend/toolBudget.test.mjs tests/frontend/toolBudgetHooks.test.mjs
+node --test tests/frontend/durableTool*.test.mjs
 ```
 
 The core and hook-adapter tests require no model, credentials, network, or
@@ -107,10 +139,15 @@ credentials or model service. Run it with the pinned Node version:
 npm install --prefix /tmp/easel-budget-runtime --ignore-scripts openclaw@2026.10.2
 node scripts/verify_native_tool_budget.mjs /tmp/easel-budget-runtime/node_modules/openclaw
 node scripts/verify_native_tool_budget.mjs /tmp/easel-budget-runtime/node_modules/openclaw --tool-search
+node scripts/verify_native_tool_budget.mjs /tmp/easel-budget-runtime/node_modules/openclaw --durable
+node scripts/verify_native_tool_budget.mjs /tmp/easel-budget-runtime/node_modules/openclaw --durable --tool-search
 ```
 
 Use an equivalent temporary directory on Windows. Each invocation creates its
 own temporary state and loopback ports; it never changes the user's profile.
 Only aggregate acceptance results go to stdout. Failed runs identify a local
-diagnostic directory. CI runs both direct tools and Tool Search on Linux and
-Windows; it does not upload raw gateway logs or transcripts.
+diagnostic directory. CI runs both direct tools and Tool Search, in memory and
+durable modes, on Linux and Windows; it does not upload raw gateway logs or
+transcripts. These native checks use fresh isolated state. Same-identity
+reopening is tested separately with hook reinstallation and real child-process
+death; the fixture does not assert native recovery preserves run IDs.

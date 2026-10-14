@@ -36,3 +36,9 @@ jobs:
       - name: Verify native Tool Search uses the same budget
         shell: bash
         run: node scripts/verify_native_tool_budget.mjs "$RUNNER_TEMP/budget-runtime/node_modules/openclaw" --tool-search
+      - name: Verify durable admission in the native gateway
+        shell: bash
+        run: node scripts/verify_native_tool_budget.mjs "$RUNNER_TEMP/budget-runtime/node_modules/openclaw" --durable
+      - name: Verify durable admission with native Tool Search
+        shell: bash
+        run: node scripts/verify_native_tool_budget.mjs "$RUNNER_TEMP/budget-runtime/node_modules/openclaw" --durable --tool-search
