@@ -19,7 +19,11 @@ def evidence():
         suite = ET.SubElement(root, "testsuite")
         for key in scenario["tests"]:
             classname, name = key.split("::")
-            ET.SubElement(suite, "testcase", classname=classname, name=name, time="0.25")
+            case = ET.SubElement(suite, "testcase", classname=classname, name=name, time="0.25")
+            if scenario.get("measurements_required"):
+                props = ET.SubElement(case, "properties")
+                ET.SubElement(props, "property", name="easel_fault_metrics", value=json.dumps({
+                    "prompt_submissions": 2, "duplicate_prompt_submissions": 0, "recovery_latency_seconds": 0.1}))
     return root
 
 
@@ -31,7 +35,7 @@ def test_complete_report_is_repeatable_and_does_not_invent_metrics():
     root = evidence()
     result = convert(root)
     assert result == convert(root) and result["complete"] is True
-    assert len(result["scenarios"]) == 3 and result["revision_verified"] is False
+    assert len(result["scenarios"]) == 4 and result["revision_verified"] is False
     assert result["scenarios"][0]["test_duration_seconds"] == 0.5
     for scenario in result["scenarios"]:
         assert scenario["model_calls"] is None
@@ -69,6 +73,43 @@ def test_missing_duration_is_not_reported_as_zero():
     del root[0][0].attrib["time"]
     assert convert(root)["scenarios"][0]["test_duration_seconds"] is None
     assert module.report(b"<testsuites/>")["scenarios"][0]["test_duration_seconds"] is None
+
+
+def test_missing_measurements_cannot_pass_and_samples_are_preserved():
+    root = evidence()
+    measured = next(case for case in root.iter("testcase") if case.find("properties") is not None)
+    result = convert(root)
+    samples = next(s["measurements"] for s in result["scenarios"] if s.get("measurements_required"))
+    assert len(samples) == 2 and samples[0]["prompt_submissions"] == 2
+    measured.remove(measured.find("properties"))
+    result = convert(root)
+    assert not result["complete"]
+    assert any(s["status"] == "missing_measurements" for s in result["scenarios"])
+
+
+@pytest.mark.parametrize("value", ["null", "{}", "broken", '{"secret":"PRIVATE"}',
+    '{"prompt_submissions":true,"duplicate_prompt_submissions":0,"recovery_latency_seconds":1}',
+    '{"prompt_submissions":2,"duplicate_prompt_submissions":3,"recovery_latency_seconds":1}',
+    '{"prompt_submissions":2,"duplicate_prompt_submissions":0,"recovery_latency_seconds":NaN}'])
+def test_invalid_measurements_are_rejected(value):
+    root = evidence()
+    prop = next(root.iter("property"))
+    prop.set("value", value)
+    with pytest.raises(ValueError):
+        convert(root)
+
+
+def test_duplicate_measurements_and_overflowing_durations_are_rejected():
+    root = evidence()
+    props = next(root.iter("properties"))
+    ET.SubElement(props, "property", **props[0].attrib)
+    with pytest.raises(ValueError):
+        convert(root)
+    root = evidence()
+    for case in root[0]:
+        case.set("time", "1e308")
+    with pytest.raises(ValueError):
+        convert(root)
 
 
 @pytest.mark.parametrize("value", ["NaN", "inf", "-1", "invalid"])

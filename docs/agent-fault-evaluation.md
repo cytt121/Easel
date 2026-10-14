@@ -1,16 +1,16 @@
 # Agent 确定性故障回归报告
 
 从已有 pytest 的 JUnit XML 生成可比较的 JSON 证据，不运行模型、不调用平台、不重放工具。
-首批三个场景覆盖原生会话身份恢复、并发会话所有权与取消清理、原生致命错误通知。
+首批四个场景覆盖原生会话身份恢复、并发会话所有权与取消清理、原生致命错误通知，以及进程死亡后的会话恢复。
 场景 ID、故障阶段、预期行为、禁止效果及具体测试映射位于报告脚本的 `SCENARIOS`。
 
 ```bash
-python -m pytest -q tests/test_agent_harnesses.py --junitxml=agent-tests.xml
+python -m pytest -q tests/test_agent_harnesses.py tests/test_agent_fault_measurements.py -o junit_family=legacy --junitxml=agent-tests.xml
 python scripts/agent_fault_report.py agent-tests.xml --revision YOUR_TESTED_COMMIT > agent-report.json
 ```
 
 测试命令失败时也可以生成报告，但必须保留 pytest 的退出码与原始 XML；生成报告不改变测试结果。
-报告命令退出码：0 表示三个登记场景全部通过，1 表示至少一个失败、错误、跳过或未运行，
+报告命令退出码：0 表示登记场景全部通过，1 表示至少一个失败、错误、跳过或未运行，
 2 表示输入文件不可读取或格式无效。0 只覆盖登记场景，不代表整个测试套件或产品全部通过。
 部分测试文件、`-k` 筛选或测试更名可能产生 `not_run`，不会被当成成功。
 
@@ -24,3 +24,10 @@ python scripts/agent_fault_report.py agent-tests.xml --revision YOUR_TESTED_COMM
 
 待任务账本、检查点及调用预算功能合入后，再分小 PR 登记对应场景、采集专门指标，
 并接入 CI artifact。真实模型任务评测需要独立的任务集、费用预算和多次采样，当前命令不提供。
+
+进程恢复场景用真实子进程运行协议 fixture，在两轮之间杀死空闲进程，再恢复同一原生会话。
+JUnit properties 记录两次明确发起的 prompt 提交数、超出预期的重复提交数，以及从下一轮
+开始到恢复完成的单调时钟耗时；这是模拟协议的恢复延迟，不是模型推理或真实业务恢复耗时。
+每个后端保留独立样本，不把少量样本平均成可靠性结论。测量字段缺失会产生
+`missing_measurements`，不能判为完整通过；非法计数和非有限数值拒绝生成报告。
+其他场景未测量的字段仍为 null，重复 prompt 不等于重复外部副作用。
