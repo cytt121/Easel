@@ -9,6 +9,12 @@ on:
     # 排队时间明显更长。
     - cron: '17 3 * * *'
   workflow_dispatch:
+    inputs:
+      fault_suite:
+        description: Fault scenario suite (recovery requires the recovery feature branches)
+        type: choice
+        options: [core, recovery]
+        default: core
 
 permissions:
   contents: read
@@ -49,8 +55,25 @@ jobs:
       # （目前 38 个，skill-wechat-publisher 那批）整批排除在 CI 之外 —— 本地 `pytest` 全绿、
       # CI 也全绿，但那部分从来没在 CI 上跑过。从根目录跑一次，两边都覆盖。
       - name: Run unit tests
+        id: unit-tests
         timeout-minutes: 10
-        run: python -m pytest -v -o faulthandler_timeout=90
+        run: python -m pytest -v -o faulthandler_timeout=90 -o junit_family=legacy --junitxml=agent-tests.xml
+      - name: Summarize deterministic agent faults
+        id: fault-report
+        if: ${{ !cancelled() && steps.unit-tests.outcome != 'skipped' }}
+        shell: bash
+        env:
+          FAULT_SUITE: ${{ inputs.fault_suite || 'core' }}
+          PYTHONUTF8: '1'
+        run: python scripts/agent_fault_report.py agent-tests.xml --suite "$FAULT_SUITE" --revision "$GITHUB_SHA" --output agent-fault-report.json
+      - name: Archive sanitized fault report
+        if: ${{ !cancelled() && steps.fault-report.outcome != 'skipped' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: agent-fault-report-${{ matrix.os }}-${{ github.run_attempt }}
+          path: agent-fault-report.json
+          if-no-files-found: error
+          retention-days: 14
 
   harness-portability:
     name: Agent settings (${{ matrix.os }}, Python ${{ matrix.python }})
@@ -176,7 +199,7 @@ jobs:
   install-real:
     name: Real install (${{ matrix.os }})
     if: >-
-      github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+      github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.fault_suite != 'recovery')
       || contains(github.event.pull_request.labels.*.name, 'ci:full-install')
     strategy:
       fail-fast: false

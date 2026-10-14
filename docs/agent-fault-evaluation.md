@@ -45,3 +45,14 @@ python scripts/agent_fault_report.py agent-tests.xml --suite recovery --revision
 主动选择 recovery 而缺少对应测试会明确失败为 not_run，不会跳过后假报完成。
 完整报告仅表示所选集合的登记断言和必要测量满足要求。它不表示未实现的严格调用预算已完成。
 工具临时错误分类/预算场景应随对应实现新增；通用失败自动重试不属于当前能力。
+## CI 与验收边界
+
+Linux / Windows 的根目录 pytest 写出 JUnit（legacy family 保留测试 properties）。即使测试失败，
+后续仍尝试生成报告；原测试退出状态不被覆盖。输入无效时报告步骤失败，缺失产物也不能显示成功。
+CI 仅归档白名单字段的 JSON，保留 14 天，不上传原始 JUnit 中的堆栈、stdout 和测试输入。
+产物名包含操作系统与 run attempt；版本标签使用实际 checkout 的 GitHub SHA（PR 通常为合并测试提交）。
+手动 CI 的 fault_suite 可选 recovery，用于组合分支；日常 PR 使用 core，避免要求尚未合入的功能。
+
+确定性评测的验收：固定场景清单、缺失证据失败、真实子进程故障注入、必要指标校验、
+相同 XML 的稳定报告、两种操作系统的 CI 与可下载 JSON。本集合不测试真实模型质量，
+不测真实平台副作用，不保证模型成本或成功率；这些不应出现在本工作的量化结论中。
