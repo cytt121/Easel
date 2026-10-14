@@ -61,6 +61,25 @@ def test_missing_or_partial_evidence_is_explicitly_not_run():
     assert not module.report(b"<testsuites/>")["complete"]
 
 
+def test_recovery_suite_requires_every_registered_variant():
+    root = evidence()
+    definitions = module.scenario_definitions("recovery")
+    assert len({s["id"] for s in definitions}) == len(definitions)
+    keys = [key for definition in definitions for key in definition["tests"]]
+    assert len(set(keys)) == len(keys)
+    assert not module.report(ET.tostring(root), suite="recovery")["complete"]
+    for definition in definitions[len(module.SCENARIOS):]:
+        suite = ET.SubElement(root, "testsuite")
+        for key in definition["tests"]:
+            classname, name = key.split("::")
+            ET.SubElement(suite, "testcase", classname=classname, name=name)
+    assert module.report(ET.tostring(root), suite="recovery")["complete"]
+    root[-1].remove(root[-1][0])
+    assert not module.report(ET.tostring(root), suite="recovery")["complete"]
+    with pytest.raises(ValueError):
+        module.report(ET.tostring(root), suite="unknown")
+
+
 def test_repeated_case_cannot_hide_an_earlier_failure():
     root = evidence()
     duplicate = ET.SubElement(root[0], "testcase", **root[0][0].attrib)

@@ -66,7 +66,16 @@ def measurements(case):
     return value
 
 
-def report(source: bytes, *, revision: str | None = None) -> dict:
+def scenario_definitions(suite):
+    if suite == "core":
+        return SCENARIOS
+    if suite == "recovery":
+        return (*SCENARIOS, *json.loads(Path(__file__).with_name("agent_recovery_scenarios.json").read_text(encoding="utf-8")))
+    raise ValueError("Unknown scenario suite")
+
+
+def report(source: bytes, *, revision: str | None = None, suite: str = "core") -> dict:
+    definitions = scenario_definitions(suite)
     if len(source) > 32 * 1024 * 1024:
         raise ValueError("JUnit input exceeds 32 MiB")
     # pytest writes UTF-8. Do not expand external/internal document entities.
@@ -80,7 +89,7 @@ def report(source: bytes, *, revision: str | None = None) -> dict:
     measured = {}
     for case in root.iter("testcase"):
         key = f"{case.get('classname', '')}::{case.get('name', '')}"
-        if not any(key in scenario["tests"] for scenario in SCENARIOS):
+        if not any(key in scenario["tests"] for scenario in definitions):
             continue
         duration = float(case.get("time")) if "time" in case.attrib else None
         if duration is not None and (not math.isfinite(duration) or duration < 0):
@@ -90,7 +99,7 @@ def report(source: bytes, *, revision: str | None = None) -> dict:
         evidence.setdefault(key, []).append((status, duration))
         measured.setdefault(key, []).append(measurements(case))
     scenarios = []
-    for definition in SCENARIOS:
+    for definition in definitions:
         missing = [key for key in definition["tests"] if key not in evidence]
         cases = [item for key in definition["tests"] for item in evidence.get(key, [])]
         counts = {state: sum(result == state for result, _ in cases)
@@ -112,6 +121,7 @@ def report(source: bytes, *, revision: str | None = None) -> dict:
                           "model_calls": None, "duplicate_external_effects": None,
                           "recovery_latency_seconds": None})
     return {"schema_version": 1, "kind": "deterministic_fault_regression",
+            "suite": suite,
             "source_sha256": hashlib.sha256(source).hexdigest(),
             "revision_label": revision, "revision_verified": False,
             "complete": all(item["status"] == "passed" for item in scenarios),
@@ -122,10 +132,12 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("junit", type=Path, help="pytest --junitxml output (UTF-8)")
     parser.add_argument("--revision", help="revision label recorded by the test runner; not independently verified")
+    parser.add_argument("--suite", choices=("core", "recovery"), default="core",
+                        help="recovery also requires the pending recovery/governance regression cases")
     args = parser.parse_args(argv)
     try:
         with args.junit.open("rb") as handle:
-            payload = report(handle.read(32 * 1024 * 1024 + 1), revision=args.revision)
+            payload = report(handle.read(32 * 1024 * 1024 + 1), revision=args.revision, suite=args.suite)
     except (OSError, ValueError, ET.ParseError):
         print("Cannot read a supported, valid JUnit report; preserve the original evidence.", file=sys.stderr)
         return 2
