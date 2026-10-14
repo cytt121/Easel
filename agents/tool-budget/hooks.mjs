@@ -6,17 +6,26 @@ const key = ctx => JSON.stringify([ctx.agentId, ctx.sessionKey, ctx.runId]);
 const denied = reason => ({ block: true, blockReason: `Easel tool budget: ${reason}` });
 
 /** Dependency-injected transport keeps admission synchronous; stop never widens its target. */
-export function installBudgetHooks(api, { stop, clock, schedule = setTimeout, cancel = clearTimeout }) {
+export function installBudgetHooks(api, { stop, clock, store = null, schedule = setTimeout, cancel = clearTimeout }) {
   const config = api.pluginConfig;
+  const monotonic = clock ?? (() => performance.now());
   // Validate configuration before registering any partial protection.
   new ToolBudget({ maxCalls: config.maxCalls, timeoutMs: config.timeoutMs, clock });
   const runs = new Map();
   const maxTrackedRuns = 10000;
-  const emit = (state, event) => api.logger.info(JSON.stringify({
-    event, ...state.budget.snapshot(), stopStatus: state.stopStatus,
-  }));
+  const emit = (state, event) => {
+    const snapshot = state.budget.snapshot();
+    api.logger.info(JSON.stringify({ event, ...snapshot,
+      rejected: snapshot.rejected + (state.durableRejected ?? 0),
+      stopReason: state.blockReason ?? snapshot.stopReason, stopStatus: state.stopStatus }));
+  };
   const halt = state => {
     if (state.stopStatus !== 'not_requested') return;
+    state.blockReason ??= state.budget.expire() ?? 'run_finished';
+    state.budget.finish();
+    if (store?.finish(state.target, state.blockReason).reason === 'storage_unavailable') {
+      state.blockReason = 'storage_unavailable';
+    }
     state.stopStatus = 'pending';
     // Do not await a stop from inside the hook: the host may await this hook
     // during cancellation. Capacity stays closed regardless of RPC outcome.
@@ -31,15 +40,27 @@ export function installBudgetHooks(api, { stop, clock, schedule = setTimeout, ca
     const block = reason => ({ outcome: 'block', reason, message: `Easel tool budget: ${reason}` });
     if (!identity(ctx)) return block('missing_run_identity');
     const existing = runs.get(key(ctx));
+    if (!existing && runs.size >= maxTrackedRuns) return block('tracking_capacity_exhausted');
+    const beforeRead = monotonic();
+    const saved = store?.begin(ctx, config);
+    if (saved && !saved.allowed) {
+      if (existing && !existing.finished) { existing.blockReason = saved.reason; halt(existing); }
+      return block(saved.reason);
+    }
     if (existing) {
-      const reason = existing.budget.expire();
+      const reason = existing.blockReason ?? existing.budget.expire();
       if (reason && !existing.finished) halt(existing);
       return reason ? block(reason) : { outcome: 'pass' };
     }
-    // Never evict a run and silently reset its budget. A full registry requires
-    // a clean gateway restart, after current runs have finished.
-    if (runs.size >= maxTrackedRuns) return block('tracking_capacity_exhausted');
-    const state = { budget: new ToolBudget({ maxCalls: config.maxCalls, timeoutMs: config.timeoutMs, clock }),
+    const elapsed = monotonic() - beforeRead;
+    const remaining = saved ? Math.floor(saved.remainingMs - elapsed) : config.timeoutMs;
+    if (!Number.isFinite(elapsed) || elapsed < 0 || remaining <= 0) {
+      const reason = !Number.isFinite(elapsed) || elapsed < 0 ? 'clock_invalid' : 'time_budget_exhausted';
+      store?.finish(ctx, reason);
+      return block(reason);
+    }
+    const state = { budget: new ToolBudget({ maxCalls: saved?.remainingCalls ?? config.maxCalls,
+      timeoutMs: remaining, clock }),
       target: { runId: ctx.runId, sessionKey: ctx.sessionKey, agentId: ctx.agentId },
       stopStatus: 'not_requested', timer: null, finished: false };
     const arm = () => {
@@ -61,6 +82,19 @@ export function installBudgetHooks(api, { stop, clock, schedule = setTimeout, ca
     }
     const state = runs.get(key(ctx));
     if (!state) return denied('run_not_admitted');
+    const reason = state.blockReason ?? state.budget.expire();
+    if (reason) {
+      state.budget.admit(event.toolCallId ?? ctx.toolCallId); // Count the rejected attempt.
+      if (!state.finished) halt(state);
+      return denied(reason);
+    }
+    const reserved = store?.reserve(ctx, event.toolCallId ?? ctx.toolCallId);
+    if (reserved && !reserved.allowed) {
+      state.durableRejected = (state.durableRejected ?? 0) + 1;
+      state.blockReason = reserved.reason;
+      halt(state);
+      return denied(reserved.reason);
+    }
     const decision = state.budget.admit(event.toolCallId ?? ctx.toolCallId);
     if (!decision.allowed) {
       if (decision.reason !== 'run_finished') halt(state);
@@ -80,6 +114,7 @@ export function installBudgetHooks(api, { stop, clock, schedule = setTimeout, ca
     state.finished = true;
     cancel(state.timer);
     state.budget.finish();
+    if (store?.finish(target).reason === 'storage_unavailable') state.blockReason = 'storage_unavailable';
     emit(state, 'easel_budget_end');
   });
 }
