@@ -6,6 +6,12 @@ tools and later policy vetoes consume their reservation. A monotonic deadline
 also runs while the model is thinking. Retries with the same run identity cannot
 reset either limit.
 
+The unit of admission is a native `before_tool_call` invocation. Tool Search
+dispatchers and their target tools each consume a reservation; a budget of two
+can execute one target through Tool Search or two directly exposed tools. A
+parallel dispatcher burst can exhaust capacity before its targets begin. Limits
+are conservative and are not a count of external API requests.
+
 The plugin is optional; installing Easel does not enable it or alter existing
 OpenClaw settings. It does not cover Codex or ACP backends, CLI child processes,
 or external side effects performed inside one admitted tool.
@@ -90,3 +96,21 @@ The core and hook-adapter tests require no model, credentials, network, or
 OpenClaw installation. They cover concurrent reservations, failed calls,
 deadline boundaries, identity errors, cancellation failure, late callbacks,
 and registry exhaustion. They do not substitute for native gateway acceptance.
+
+The acceptance script starts an isolated native gateway, a loopback fake model,
+and a harmless counter tool. It asserts that a five-call burst executes exactly
+two effects, stopping that run leaves a concurrent run able to finish, and the
+deadline aborts a model response that never completes. It requires no real
+credentials or model service. Run it with the pinned Node version:
+
+```sh
+npm install --prefix /tmp/easel-budget-runtime --ignore-scripts openclaw@2026.10.2
+node scripts/verify_native_tool_budget.mjs /tmp/easel-budget-runtime/node_modules/openclaw
+node scripts/verify_native_tool_budget.mjs /tmp/easel-budget-runtime/node_modules/openclaw --tool-search
+```
+
+Use an equivalent temporary directory on Windows. Each invocation creates its
+own temporary state and loopback ports; it never changes the user's profile.
+Only aggregate acceptance results go to stdout. Failed runs identify a local
+diagnostic directory. CI runs both direct tools and Tool Search on Linux and
+Windows; it does not upload raw gateway logs or transcripts.
