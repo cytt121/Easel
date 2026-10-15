@@ -1,15 +1,17 @@
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { DurableToolStore } from '../../agents/tool-budget/durable-store.mjs';
 
 const identity = { agentId: 'private-agent', sessionKey: 'private-session', runId: 'private-run' };
 const policy = { maxCalls: 2, timeoutMs: 1000 };
+const successor = { ...identity, runId: 'recovered-run' };
 const moduleUrl = new URL('../../agents/tool-budget/durable-store.mjs', import.meta.url).href;
 const children = new WeakMap();
 function fixture(t) {
@@ -47,6 +49,91 @@ test('reopen preserves reservations, original deadline and closed runs', t => {
   resumed.close();
   assert.equal(f.open().begin(identity, policy).reason, 'call_budget_exhausted');
   assert.ok(!readFileSync(f.path).includes(Buffer.from('private-')));
+});
+
+test('transfer preserves canonical quota, deadline and call IDs while fencing all old writes', t => {
+  const f = fixture(t), old = f.open(true), recovery = f.open();
+  old.begin(identity, policy);
+  old.reserve(identity, 'spent');
+  f.advance(500);
+  assert.deepEqual(recovery.transfer(identity, successor),
+    { allowed: true, used: 1, remainingCalls: 1, remainingMs: 600 });
+  assert.equal(old.begin(identity, { ...policy, maxCalls: 10 }).reason, 'execution_superseded');
+  assert.equal(old.reserve(identity, 'late').reason, 'execution_superseded');
+  assert.equal(old.finish(identity).reason, 'execution_superseded');
+  old.close(); recovery.close();
+  const reopened = f.open();
+  assert.equal(reopened.begin(successor, policy).remainingCalls, 1);
+  assert.equal(reopened.reserve(successor, 'spent').reason, 'duplicate_call_identity');
+});
+
+test('transfer validates owner, active predecessor, unused target and terminal state', t => {
+  const f = fixture(t), store = f.open(true);
+  store.begin(identity, policy);
+  assert.equal(store.transfer(identity, { ...successor, sessionKey: 'other' }).reason, 'owner_mismatch');
+  assert.equal(store.transfer(identity, { ...successor, agentId: 'other' }).reason, 'owner_mismatch');
+  assert.equal(store.transfer(identity, identity).reason, 'same_execution');
+  const existing = { ...identity, runId: 'existing' };
+  store.begin(existing, policy);
+  assert.equal(store.transfer(identity, existing).reason, 'target_identity_exists');
+  assert.equal(store.transfer(identity, successor).allowed, true);
+  assert.equal(store.transfer(identity, { ...identity, runId: 'racer' }).reason, 'execution_superseded');
+  assert.equal(store.transfer(successor, identity).reason, 'target_identity_exists');
+  store.finish(successor);
+  assert.equal(store.transfer(successor, { ...identity, runId: 'finished' }).reason, 'run_finished');
+});
+
+test('recovery cannot extend an expired deadline or discard spent quota through chained transfers', t => {
+  const f = fixture(t), store = f.open(true);
+  store.begin(identity, policy); store.reserve(identity, 'spent');
+  const third = { ...identity, runId: 'third' };
+  assert.equal(store.transfer(identity, successor).allowed, true);
+  assert.equal(store.transfer(successor, third).remainingCalls, 1);
+  assert.equal(store.reserve(third, 'last').allowed, true);
+  assert.equal(store.reserve(third, 'excess').reason, 'call_budget_exhausted');
+  const other = { ...identity, runId: 'expires' };
+  store.begin(other, policy); f.advance(1100);
+  assert.equal(store.transfer(other, { ...identity, runId: 'too-late' }).reason, 'time_budget_exhausted');
+});
+
+test('failed transfer transaction restores old ownership without granting new identity', t => {
+  const f = fixture(t), store = f.open(true);
+  store.begin(identity, policy);
+  const db = new DatabaseSync(f.path);
+  db.exec("CREATE TRIGGER reject_binding BEFORE INSERT ON bindings BEGIN SELECT RAISE(ABORT, 'fixture'); END;");
+  assert.equal(store.transfer(identity, successor).reason, 'storage_unavailable');
+  assert.equal(db.prepare('SELECT count(*) AS n FROM bindings WHERE active=1').get().n, 1);
+  db.exec('DROP TRIGGER reject_binding'); db.close(); store.close();
+  assert.equal(f.open().begin(identity, policy).allowed, true);
+});
+
+test('v1 upgrade is explicit and preserves spent quota and the original deadline', t => {
+  const f = fixture(t), store = f.open(true);
+  store.begin(identity, policy); store.reserve(identity, 'spent'); store.close();
+  const db = new DatabaseSync(f.path);
+  db.exec('DROP TABLE bindings; PRAGMA user_version=1;'); db.close();
+  assert.throws(() => f.open(), /supported/);
+  const upgraded = new DurableToolStore(f.path, { upgrade: true, clock: () => 500 });
+  try {
+    assert.equal(upgraded.transfer(identity, successor).remainingMs, 600);
+    assert.equal(upgraded.begin(successor, policy).remainingCalls, 1);
+  } finally { upgraded.close(); }
+});
+
+test('local recovery command transfers once without disclosing identity or dispatching tools', t => {
+  const f = fixture(t);
+  const store = new DurableToolStore(f.path, { create: true });
+  store.begin(identity, { ...policy, timeoutMs: 60000 }); store.reserve(identity, 'spent'); store.close();
+  const command = fileURLToPath(new URL('../../scripts/transfer_tool_budget.mjs', import.meta.url));
+  const args = [command, '--ledger', f.path, '--agent', identity.agentId,
+    '--session', identity.sessionKey, '--previous', identity.runId, '--next', successor.runId];
+  const first = spawnSync(process.execPath, args, { encoding: 'utf8', windowsHide: true });
+  assert.equal(first.status, 0, first.stderr);
+  assert.equal(JSON.parse(first.stdout).remainingCalls, 1);
+  assert.ok(!first.stdout.includes('private-'));
+  const second = spawnSync(process.execPath, args, { encoding: 'utf8', windowsHide: true });
+  assert.equal(second.status, 1);
+  assert.equal(JSON.parse(second.stdout).reason, 'execution_superseded');
 });
 
 test('policy changes, duplicate calls and finish cannot reset a durable identity', t => {
@@ -174,6 +261,47 @@ test('two processes racing for one remaining reservation admit exactly one', { t
   for (const worker of workers) { worker.proc.kill('SIGKILL'); await worker.exited; }
   assert.equal(f.open().begin(identity, { maxCalls: 1, timeoutMs: 1000 }).remainingCalls ?? 0, 0);
 });
+
+test('concurrent recovery controllers transfer one predecessor exactly once', { timeout: 15000 }, async t => {
+  const f = fixture(t), store = f.open(true);
+  store.begin(identity, policy); store.reserve(identity, 'spent'); store.close();
+  const source = `import { DurableToolStore } from ${JSON.stringify(moduleUrl)};
+    const s = new DurableToolStore(process.argv[1], { clock: () => 100 });
+    process.on('message', runId => { process.send(s.transfer(${JSON.stringify(identity)},
+      { ...${JSON.stringify(identity)}, runId })); }); process.send('ready');`;
+  const workers = [child(t, source, f.path), child(t, source, f.path)];
+  await Promise.all(workers.map(worker => worker.message()));
+  const pending = workers.map(worker => worker.message());
+  workers.forEach((worker, i) => worker.proc.send(`recovery-${i}`));
+  assert.equal((await Promise.all(pending)).filter(result => result.allowed).length, 1);
+  for (const worker of workers) { worker.proc.kill('SIGKILL'); await worker.exited; }
+  const db = new DatabaseSync(f.path);
+  assert.equal(db.prepare('SELECT count(*) AS n FROM bindings WHERE active=1').get().n, 1);
+  assert.equal(db.prepare('SELECT used FROM runs').get().used, 1);
+  db.close();
+});
+
+for (const committed of [false, true]) {
+  test(`process death ${committed ? 'after' : 'before'} transfer commit preserves one active execution`,
+    { timeout: 15000 }, async t => {
+      const f = fixture(t), store = f.open(true);
+      store.begin(identity, policy); store.reserve(identity, 'spent'); store.close();
+      const source = committed
+        ? `import { DurableToolStore } from ${JSON.stringify(moduleUrl)};
+           const s = new DurableToolStore(process.argv[1], { clock: () => 100 });
+           process.send(s.transfer(${JSON.stringify(identity)}, ${JSON.stringify(successor)}));`
+        : `import { DatabaseSync } from 'node:sqlite'; const d=new DatabaseSync(process.argv[1]);
+           d.exec('BEGIN IMMEDIATE; UPDATE bindings SET active=0;'); process.send('uncommitted');`;
+      const worker = child(t, source + '\nsetInterval(() => {},1000);', f.path);
+      const reported = await worker.message();
+      if (committed) assert.equal(reported.allowed, true);
+      else assert.equal(reported, 'uncommitted');
+      worker.proc.kill('SIGKILL'); await worker.exited;
+      const reopened = f.open();
+      assert.equal(reopened.begin(committed ? successor : identity, policy).remainingCalls, 1);
+      if (committed) assert.equal(reopened.finish(identity).reason, 'execution_superseded');
+    });
+}
 
 for (const committed of [false, true]) {
   test(`process death ${committed ? 'after' : 'before'} commit preserves reservation semantics`, { timeout: 15000 }, async t => {
