@@ -7,6 +7,10 @@ also runs while the model is thinking. Retries with the same run identity cannot
 reset either limit within the process. Optional durable reservations retain the
 same run identity's quota and original deadline across restarts.
 
+Trusted recovery controllers can also transfer an unfinished budget to a new native run ID,
+fencing the old execution while retaining quota and deadline. See
+[budget recovery](../../docs/tool-budget-recovery.md) for the explicit command and offline v1-to-v2 upgrade.
+
 The unit of admission is a native `before_tool_call` invocation. Tool Search
 dispatchers and their target tools each consume a reservation; a budget of two
 can execute one target through Tool Search or two directly exposed tools. A
@@ -111,8 +115,8 @@ and deadline; changing policy for that identity closes it. The persisted wall
 clock includes downtime; a monotonic timer still bounds in-process thinking.
 Storage errors request a scoped stop but do not prove the model has stopped.
 
-This does not map changed native run IDs back to old budgets or automatically
-resume interrupted work. It assumes trustworthy local storage and system time;
+Changed native run IDs require an explicit trusted recovery transfer; they are not
+automatically linked and interrupted work is not automatically resumed. It assumes trustworthy local storage and system time;
 restoring old database backups or undetected clock adjustments are outside the
 guarantee. Do not delete/reset the ledger to clear capacity while old identities
 can return. See [ledger semantics](../../docs/durable-tool-reservations.md).

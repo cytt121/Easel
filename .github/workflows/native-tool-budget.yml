@@ -42,3 +42,9 @@ jobs:
       - name: Verify durable admission with native Tool Search
         shell: bash
         run: node scripts/verify_native_tool_budget.mjs "$RUNNER_TEMP/budget-runtime/node_modules/openclaw" --durable --tool-search
+      - name: Verify recovered execution inherits the spent native budget
+        shell: bash
+        run: node scripts/verify_native_tool_budget.mjs "$RUNNER_TEMP/budget-runtime/node_modules/openclaw" --durable --recovery
+      - name: Verify recovered Tool Search cannot bypass the remaining budget
+        shell: bash
+        run: node scripts/verify_native_tool_budget.mjs "$RUNNER_TEMP/budget-runtime/node_modules/openclaw" --durable --recovery --tool-search
