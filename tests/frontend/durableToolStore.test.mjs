@@ -5,6 +5,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { DurableToolStore } from '../../agents/tool-budget/durable-store.mjs';
 
@@ -123,7 +124,8 @@ test('local recovery command transfers once without disclosing identity or dispa
   const f = fixture(t);
   const store = new DurableToolStore(f.path, { create: true });
   store.begin(identity, { ...policy, timeoutMs: 60000 }); store.reserve(identity, 'spent'); store.close();
-  const args = ['scripts/transfer_tool_budget.mjs', '--ledger', f.path, '--agent', identity.agentId,
+  const command = fileURLToPath(new URL('../../scripts/transfer_tool_budget.mjs', import.meta.url));
+  const args = [command, '--ledger', f.path, '--agent', identity.agentId,
     '--session', identity.sessionKey, '--previous', identity.runId, '--next', successor.runId];
   const first = spawnSync(process.execPath, args, { encoding: 'utf8', windowsHide: true });
   assert.equal(first.status, 0, first.stderr);
