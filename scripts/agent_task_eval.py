@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import math
 import os
@@ -178,6 +179,8 @@ async def evaluate_suite(base_url, api_key, model, *, samples=1, total_timeout=1
                           "tool_checks": checks, "tool_errors": errors,
                           "tool_error_rate": errors / checks if checks else None})
     return {"schema_version": 1, "suite": "synthetic-agent-tasks-v1", "samples_per_scenario": samples,
+            "deployment_fingerprint": hashlib.sha256(json.dumps([endpoint(base_url), model],
+                                                                 ensure_ascii=False).encode()).hexdigest(),
             "complete": len(tasks) == samples * len(SCENARIOS), "max_requests": samples * 7,
             "max_completion_tokens_per_request": max_tokens, "total_timeout_seconds": total_timeout,
             "tasks": tasks, "scenarios": summaries}
