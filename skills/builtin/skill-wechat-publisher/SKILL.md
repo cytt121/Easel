@@ -61,6 +61,10 @@ python3 skills/builtin/skill-wechat-publisher/scripts/wechat_api.py list-account
 
 官方 API 配置文件固定放 skill 根目录（`config.py::_find_unified_yaml()` 只查此处），所选账号必须有 `app_id` 和 `app_secret`。API 参数细节见 [references/api_reference.md](references/api_reference.md)，错误码见 [references/errors.md](references/errors.md)。这些要求不适用于默认的后台会话发布。
 
+官方 API 的自动化任务若需要跨进程防重复提交，应在内容检查和授权完成后，使用
+[持久化草稿操作](../../../docs/wechat-draft-recovery.md)接收已准备的 `articles` payload。
+超时、断连或丢失回执时不能自动换操作 ID 或重新运行创建；先查询本地状态，有回执才核对远端。
+
 ## 完整工作流程（7 阶段，第 7 为可选 opt-in）
 
 ### 阶段一：理解需求与收集素材
