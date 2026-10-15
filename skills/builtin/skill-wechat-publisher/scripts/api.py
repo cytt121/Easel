@@ -6,7 +6,7 @@
 - 新建草稿(图文 news / 贴图 newspic 两种)
 - 一站式发布便捷函数 publish_article / publish_newspic
 
-对瞬时错误(5xx / Timeout)自动重试;对应用层错误(如 40164 IP 白名单)直接抛出不重试。
+上传请求对瞬时错误自动重试；草稿创建只发送一次，未知结果不能自动重放。
 """
 
 import json
@@ -63,6 +63,39 @@ def _api_request_with_retry(method: str, url: str, retries: int = API_RETRIES, *
                 continue
             raise
     raise last_exc or RuntimeError("API 请求失败(未知原因)")
+
+
+class DraftOutcomeUnknown(RuntimeError):
+    """The remote draft may exist; callers must not automatically repeat creation."""
+
+
+def _create_draft_once(payload: dict) -> str:
+    # Fetch credentials before the side-effect request. Never retry or redirect draft/add.
+    token = get_access_token()
+    raw = json.dumps(payload, ensure_ascii=False, allow_nan=False).encode("utf-8")
+    unknown = "草稿创建结果未知，请先在目标公众号核对；禁止自动重试，以免重复创建草稿。"
+    try:
+        response = requests.request("POST", f"{API_BASE}/draft/add?access_token={token}",
+                                    data=raw, headers={"Content-Type": "application/json; charset=utf-8"},
+                                    timeout=API_TIMEOUT_SEC, allow_redirects=False)
+        if response.status_code != 200:
+            raise DraftOutcomeUnknown(unknown)
+        data = response.json()
+        if not isinstance(data, dict):
+            raise DraftOutcomeUnknown(unknown)
+        # An explicit application rejection is distinct from an ambiguous HTTP/transport failure.
+        code = data.get("errcode", 0)
+        if type(code) is not int:
+            raise DraftOutcomeUnknown(unknown)
+        if code != 0:
+            raise RuntimeError(f"草稿创建被微信拒绝 [{code}]，未自动重试。")
+        media_id = data.get("media_id")
+        if not isinstance(media_id, str) or not media_id.strip() or len(media_id) > 512:
+            raise DraftOutcomeUnknown(unknown)
+        return media_id
+    except (requests.exceptions.RequestException, ValueError):
+        # Do not propagate an exception containing the access_token URL or response body.
+        raise DraftOutcomeUnknown(unknown) from None
 
 
 # ============================================================
@@ -209,9 +242,6 @@ def add_newspic_draft(
     if len(image_media_ids) > 20:
         raise ValueError(f"newspic 最多 20 张图,当前 {len(image_media_ids)} 张")
 
-    token = get_access_token()
-    url = f"{API_BASE}/draft/add?access_token={token}"
-
     article: Dict[str, Any] = {
         "article_type": "newspic",
         "title": title,
@@ -227,21 +257,9 @@ def add_newspic_draft(
 
     payload = {"articles": [article]}
 
-    resp = _api_request_with_retry(
-        "POST", url,
-        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-        headers={"Content-Type": "application/json; charset=utf-8"},
-    )
-    resp.raise_for_status()
-    data = resp.json()
-
-    if "media_id" not in data:
-        error_msg = data.get("errmsg", "未知错误")
-        error_code = data.get("errcode", -1)
-        raise RuntimeError(f"新建贴图草稿失败 [{error_code}]: {error_msg}")
-
-    print(f"贴图草稿创建成功! media_id={data['media_id']}")
-    return data["media_id"]
+    media_id = _create_draft_once(payload)
+    print(f"贴图草稿创建成功! media_id={media_id}")
+    return media_id
 
 
 def add_draft(articles: Union[Dict[str, Any], List[Dict[str, Any]]]) -> str:
@@ -256,29 +274,14 @@ def add_draft(articles: Union[Dict[str, Any], List[Dict[str, Any]]]) -> str:
     Returns:
         str: 草稿 media_id
     """
-    token = get_access_token()
-    url = f"{API_BASE}/draft/add?access_token={token}"
-
     if isinstance(articles, dict):
         articles = [articles]
 
     payload = {"articles": articles}
 
-    resp = _api_request_with_retry(
-        "POST", url,
-        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-        headers={"Content-Type": "application/json; charset=utf-8"},
-    )
-    resp.raise_for_status()
-    data = resp.json()
-
-    if "media_id" not in data:
-        error_msg = data.get("errmsg", "未知错误")
-        error_code = data.get("errcode", -1)
-        raise RuntimeError(f"新建草稿失败 [{error_code}]: {error_msg}")
-
-    print(f"草稿创建成功! media_id={data['media_id']}")
-    return data["media_id"]
+    media_id = _create_draft_once(payload)
+    print(f"草稿创建成功! media_id={media_id}")
+    return media_id
 
 
 # ============================================================
