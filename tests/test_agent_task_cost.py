@@ -155,3 +155,40 @@ def test_duplicate_json_and_oversized_inputs_rejected(tmp_path):
     path.write_bytes(b" " * (1024 * 1024 + 1))
     with pytest.raises(ValueError):
         cost.read_json(path)
+
+
+@pytest.mark.parametrize("usage", [True, False])
+def test_completed_evaluation_report_flows_into_cost_estimator(usage):
+    def respond(request):
+        payload = json.loads(request.content)
+        messages = payload["messages"]
+        name = payload["tools"][0]["function"]["name"]
+        previous = json.loads(messages[-1]["content"]) if len(messages) > 1 else None
+        if previous and "brand_id" not in previous:
+            message = {"content": json.dumps({"receipt": previous["receipt"],
+                "status": "needs_review" if name == "submit_campaign" else "prepared"})}
+            reason = "stop"
+        else:
+            args = {"prepare_post": {"channel": "wechat", "title": "新品发布", "date": "2026-11-20"},
+                    "lookup_brand": {"topic": "新品发布"},
+                    "submit_campaign": {"job_id": "campaign-fixture"}}
+            arguments = args[name] if previous is None else {"brand_id": previous["brand_id"], "channel": "wechat"}
+            message = {"tool_calls": [{"id": f"call-{len(messages)}", "type": "function", "function": {
+                "name": name if previous is None else "prepare_brand_post", "arguments": json.dumps(arguments)}}]}
+            reason = "tool_calls"
+        response = {"choices": [{"message": {"role": "assistant", **message}, "finish_reason": reason}]}
+        if usage:
+            response["usage"] = {"prompt_tokens": 10, "completion_tokens": 5}
+        return httpx.Response(200, json=response)
+
+    report = asyncio.run(evaluation.evaluate_suite("https://fixture.invalid/v1", "fixture-key", "fixture-model",
+        transport=httpx.MockTransport(respond)))
+    assert report["complete"] and all(row["status"] == "passed" for row in report["tasks"])
+    _, pricing = fixtures()
+    pricing["deployment_fingerprint"] = report["deployment_fingerprint"]
+    before = copy.deepcopy(report)
+    result = cost.estimate(report, pricing)
+    assert report == before
+    assert result["planned_total_estimate"] == ("0.000525" if usage else None)
+    assert result["unknown_cost_tasks"] == (0 if usage else 3)
+    assert result["priced_tasks"] == (3 if usage else 0)
