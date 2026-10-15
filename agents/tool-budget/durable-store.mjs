@@ -24,7 +24,7 @@ export class DurableToolStore {
   #clock;
   #failed = false;
 
-  constructor(path, { create = false, clock = Date.now } = {}) {
+  constructor(path, { create = false, upgrade = false, clock = Date.now } = {}) {
     if (typeof path !== 'string' || !isAbsolute(path)) throw new TypeError('Absolute budget database path required');
     this.#clock = clock;
     try {
@@ -47,8 +47,21 @@ export class DurableToolStore {
           ) STRICT;
           PRAGMA application_id=${APP_ID}; PRAGMA user_version=1; COMMIT;`);
       }
-      if (this.#db.prepare('PRAGMA application_id').get().application_id !== APP_ID ||
-          this.#db.prepare('PRAGMA user_version').get().user_version !== 1) throw new Error();
+      if (this.#db.prepare('PRAGMA application_id').get().application_id !== APP_ID) throw new Error();
+      if (create || upgrade) {
+        this.#db.exec('BEGIN IMMEDIATE');
+        if (this.#db.prepare('PRAGMA user_version').get().user_version === 1) {
+          this.#db.exec(`CREATE TABLE bindings (
+            id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES runs(id),
+            active INTEGER NOT NULL CHECK(active IN (0,1))
+          ) STRICT;
+          CREATE UNIQUE INDEX one_active_execution ON bindings(run_id) WHERE active=1;
+          INSERT INTO bindings SELECT id,id,1 FROM runs;
+          PRAGMA user_version=2;`);
+        }
+        this.#db.exec('COMMIT');
+      }
+      if (this.#db.prepare('PRAGMA user_version').get().user_version !== 2) throw new Error();
     } catch {
       try { this.#db?.close(); } catch { /* Preserve the original database for inspection. */ }
       throw new Error('Cannot open a supported durable tool budget database');
@@ -74,6 +87,11 @@ export class DurableToolStore {
     return deny(reason);
   }
 
+  #load(id) {
+    return this.#db.prepare(`SELECT runs.*, bindings.active FROM bindings
+      JOIN runs ON runs.id=bindings.run_id WHERE bindings.id=?`).get(id);
+  }
+
   #check(row, now) {
     if (row.reason) return deny(row.reason);
     if (!validTime(now) || now < row.last_ms) return this.#stop(row.id, 'clock_invalid');
@@ -89,29 +107,34 @@ export class DurableToolStore {
     if (!validPolicy(policy)) return deny('invalid_policy');
     return this.#transaction(() => {
       const now = this.#clock();
-      let row = this.#db.prepare('SELECT * FROM runs WHERE id=?').get(id);
+      let row = this.#load(id);
       if (!row) {
         if (!validTime(now)) return deny('clock_invalid');
-        if (this.#db.prepare('SELECT count(*) AS n FROM runs').get().n >= 10000) {
+        if (this.#db.prepare('SELECT count(*) AS n FROM runs').get().n >= 10000 ||
+            this.#db.prepare('SELECT count(*) AS n FROM bindings').get().n >= 20000) {
           return deny('tracking_capacity_exhausted');
         }
         this.#db.prepare('INSERT INTO runs(id,max_calls,timeout_ms,deadline_ms,last_ms) VALUES(?,?,?,?,?)')
           .run(id, policy.maxCalls, policy.timeoutMs, now + policy.timeoutMs, now);
-        row = this.#db.prepare('SELECT * FROM runs WHERE id=?').get(id);
+        this.#db.prepare('INSERT INTO bindings VALUES(?,?,1)').run(id, id);
+        row = this.#load(id);
       }
+      if (!row.active) return deny('execution_superseded');
       if (row.max_calls !== policy.maxCalls || row.timeout_ms !== policy.timeoutMs) {
-        return this.#stop(id, 'policy_mismatch');
+        return this.#stop(row.id, 'policy_mismatch');
       }
       return this.#check(row, now);
     });
   }
 
   reserve(identity, callId) {
-    const id = runKey(identity);
+    let id = runKey(identity);
     if (!id) return deny('missing_run_identity');
     return this.#transaction(() => {
-      const row = this.#db.prepare('SELECT * FROM runs WHERE id=?').get(id);
+      const row = this.#load(id);
       if (!row) return deny('run_not_admitted');
+      if (!row.active) return deny('execution_superseded');
+      id = row.id;
       const checked = this.#check(row, this.#clock());
       if (!checked.allowed) return checked;
       if (!validId(callId)) return this.#stop(id, 'missing_call_identity');
@@ -131,9 +154,36 @@ export class DurableToolStore {
     if (!id) return deny('missing_run_identity');
     if (!stopReasons.has(reason)) return deny('invalid_stop_reason');
     return this.#transaction(() => {
-      const row = this.#db.prepare('SELECT * FROM runs WHERE id=?').get(id);
+      const row = this.#load(id);
       if (!row) return deny('run_not_admitted');
-      return this.#stop(id, row.reason ?? reason);
+      if (!row.active) return deny('execution_superseded');
+      return this.#stop(row.id, row.reason ?? reason);
+    });
+  }
+
+  /** Trusted local recovery controller only; never expose as a model-callable tool. */
+  transfer(previous, next) {
+    const before = runKey(previous), after = runKey(next);
+    if (!before || !after) return deny('missing_run_identity');
+    if (previous.agentId !== next.agentId || previous.sessionKey !== next.sessionKey) {
+      return deny('owner_mismatch');
+    }
+    if (before === after) return deny('same_execution');
+    return this.#transaction(() => {
+      const row = this.#load(before);
+      if (!row) return deny('run_not_admitted');
+      if (!row.active) return deny('execution_superseded');
+      const checked = this.#check(row, this.#clock());
+      if (!checked.allowed) return checked;
+      if (this.#load(after) || this.#db.prepare('SELECT 1 FROM runs WHERE id=?').get(after)) {
+        return deny('target_identity_exists');
+      }
+      if (this.#db.prepare('SELECT count(*) AS n FROM bindings').get().n >= 20000) {
+        return deny('tracking_capacity_exhausted');
+      }
+      this.#db.prepare('UPDATE bindings SET active=0 WHERE id=?').run(before);
+      this.#db.prepare('INSERT INTO bindings VALUES(?,?,1)').run(after, row.id);
+      return checked;
     });
   }
 

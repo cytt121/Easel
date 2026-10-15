@@ -13,8 +13,12 @@ import { DurableToolStore } from '../agents/tool-budget/durable-store.mjs';
 const runtime = path.resolve(process.argv[2] ?? 'node_modules/openclaw');
 const toolSearch = process.argv.includes('--tool-search');
 const durable = process.argv.includes('--durable');
+const recovery = process.argv.includes('--recovery');
+assert.ok(!recovery || durable, 'Recovery acceptance requires --durable');
+// Recovery starts its original deadline before native dispatch/cold model setup.
+const budgetTimeout = recovery ? 30000 : 8000;
 // Tool Search exposes both the dispatcher and target to native tool hooks.
-const expectedEffects = toolSearch ? 1 : 2;
+const expectedEffects = toolSearch ? (recovery ? 0 : 1) : (recovery ? 1 : 2);
 const version = JSON.parse(fs.readFileSync(path.join(runtime, 'package.json'), 'utf8')).version;
 assert.equal(version, '2026.10.2', 'Use the pinned acceptance runtime; revalidate other versions separately');
 const plugin = fileURLToPath(new URL('../agents/tool-budget', import.meta.url));
@@ -25,9 +29,11 @@ const fixture = path.join(root, 'fixture');
 const logPath = path.join(root, 'gateway.log');
 const effectsPath = path.join(root, 'effects.jsonl');
 const stateFile = path.join(root, 'budget.sqlite');
+const effectLines = () => fs.existsSync(effectsPath)
+  ? fs.readFileSync(effectsPath, 'utf8').trim().split('\n').filter(Boolean) : [];
 if (durable) new DurableToolStore(stateFile, { create: true }).close();
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
-async function until(predicate, timeout = 30000) {
+async function until(predicate, timeout = recovery ? 60000 : 30000) {
   const end = performance.now() + timeout;
   while (!await predicate()) {
     if (performance.now() >= end) throw new Error('Native acceptance condition timed out');
@@ -109,7 +115,7 @@ export default {id:'easel-budget-fixture',register(api){api.registerTool(ctx=>({
   tools: { allow: ['budget_fixture'], toolSearch },
   plugins: { allow: ['easel-tool-budget', 'easel-budget-fixture'], load: { paths: [plugin, fixture] }, entries: {
     'easel-tool-budget': { enabled: true, hooks: { allowConversationAccess: true },
-      config: { maxCalls: 2, timeoutMs: 8000, ...(durable ? { stateFile } : {}) } },
+      config: { maxCalls: 2, timeoutMs: budgetTimeout, ...(durable ? { stateFile } : {}) } },
     'easel-budget-fixture': { enabled: true }, 'memory-core': { enabled: false },
   } }, cron: { enabled: false }, update: { checkOnStart: false } };
   fs.writeFileSync(path.join(root, 'openclaw.json'), JSON.stringify(config));
@@ -132,15 +138,27 @@ export default {id:'easel-budget-fixture',register(api){api.registerTool(ctx=>({
     } catch { return false; }
   }, 120000);
   const { callGatewayFromCli } = await import(pathToFileURL(path.join(runtime, 'dist/plugin-sdk/gateway-runtime.js')));
+  const recoveredRun = `fixture-recovered-${Date.now()}`;
+  if (recovery) {
+    const ledger = new DurableToolStore(stateFile);
+    try {
+      const previous = { agentId: 'main', sessionKey: 'agent:main:budget-calls', runId: 'fixture-interrupted' };
+      const next = { ...previous, runId: recoveredRun };
+      assert.equal(ledger.begin(previous, { maxCalls: 2, timeoutMs: budgetTimeout }).allowed, true);
+      assert.equal(ledger.reserve(previous, 'already-spent').allowed, true);
+      assert.equal(ledger.transfer(previous, next).remainingCalls, 1);
+      assert.equal(ledger.finish(previous).reason, 'execution_superseded');
+    } finally { ledger.close(); }
+  }
   const send = label => callGatewayFromCli('chat.send', { timeout: '20000', json: true }, {
     sessionKey: `agent:main:budget-${label}`, message: `EASEL_FIXTURE_${label}`,
-    idempotencyKey: `fixture-${label}-${Date.now()}`,
+    idempotencyKey: recovery && label === 'calls' ? recoveredRun : `fixture-${label}-${Date.now()}`,
   }, { progress: false });
   await Promise.all([send('calls'), send('survivor')]);
   await until(() => stopped('call_budget_exhausted') && events().some(event =>
     event.event === 'easel_budget_end' && event.stopReason === 'run_finished'));
   assert.ifError(fixtureError);
-  const effects = fs.readFileSync(effectsPath, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+  const effects = effectLines().map(line => JSON.parse(line));
   assert.equal(effects.length, expectedEffects, 'Native effects must match admitted dispatch depth');
   assert.ok(effects.every(effect => effect.session === 'agent:main:budget-calls'));
   assert.equal(requests.survivor, 1);
@@ -151,7 +169,7 @@ export default {id:'easel-budget-fixture',register(api){api.registerTool(ctx=>({
   await sleep(1000);
   assert.equal(requests.calls, countAfterStop, 'Cancelled model continued requesting tools');
   assert.equal(requests.thinking, 1, 'Deadline cancellation retried the model');
-  assert.equal(fs.readFileSync(effectsPath, 'utf8').trim().split('\n').length, expectedEffects);
+  assert.equal(effectLines().length, expectedEffects);
   assert.equal(events().filter(event => event.event === 'easel_budget_stop').length, 2);
   if (durable) {
     const ledger = new DatabaseSync(stateFile, { readOnly: true });
@@ -165,7 +183,7 @@ export default {id:'easel-budget-fixture',register(api){api.registerTool(ctx=>({
       assert.equal(ledger.prepare('SELECT count(*) AS n FROM calls').get().n, 2);
     } finally { ledger.close(); }
   }
-  console.log(JSON.stringify({ runtime: version, toolSearch, durable, complete: true, toolEffects: effects.length,
+  console.log(JSON.stringify({ runtime: version, toolSearch, durable, recovery, complete: true, toolEffects: effects.length,
     callStopConfirmed: true, deadlineStopConfirmed: true, concurrentRunCompleted: true, modelRequests: requests }));
 } catch (error) {
   console.error(`Native budget acceptance failed; isolated diagnostics: ${root}`);

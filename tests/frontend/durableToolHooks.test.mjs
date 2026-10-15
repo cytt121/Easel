@@ -52,6 +52,25 @@ test('plugin reinstallation restores spent quota instead of granting a fresh bud
   assert.equal(f.install().begin().outcome, 'block');
 });
 
+test('new execution inherits budget while old hooks cannot spend or close it', async t => {
+  const f = fixture(t), old = f.install();
+  const next = { ...ctx, runId: 'recovered' };
+  old.begin(); old.call('spent');
+  f.advanceWall(600);
+  const resumed = f.install();
+  assert.equal(resumed.store.transfer(ctx, next).allowed, true);
+  assert.equal(resumed.begin(next).outcome, 'pass');
+  assert.equal(resumed.timers[0].delay, 500);
+  assert.match(old.call('late').blockReason, /execution_superseded/);
+  old.hooks.agent_end({}, ctx);
+  await drain();
+  assert.equal(resumed.call('remaining', next), undefined);
+  assert.match(resumed.call('excess', next).blockReason, /call_budget_exhausted/);
+  await drain();
+  assert.equal(old.stops[0].runId, ctx.runId);
+  assert.equal(resumed.stops[0].runId, next.runId);
+});
+
 test('duplicate calls and changed policy are denied after reinstall', t => {
   const f = fixture(t), first = f.install();
   first.begin();
