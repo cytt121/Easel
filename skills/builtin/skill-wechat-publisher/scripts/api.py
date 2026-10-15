@@ -69,9 +69,13 @@ class DraftOutcomeUnknown(RuntimeError):
     """The remote draft may exist; callers must not automatically repeat creation."""
 
 
-def _create_draft_once(payload: dict) -> str:
+class DraftRejected(RuntimeError):
+    """An explicit provider rejection, distinct from an ambiguous submission."""
+
+
+def _create_draft_once(payload: dict, *, token: Optional[str] = None) -> str:
     # Fetch credentials before the side-effect request. Never retry or redirect draft/add.
-    token = get_access_token()
+    token = token if token is not None else get_access_token()
     raw = json.dumps(payload, ensure_ascii=False, allow_nan=False).encode("utf-8")
     unknown = "草稿创建结果未知，请先在目标公众号核对；禁止自动重试，以免重复创建草稿。"
     try:
@@ -88,7 +92,7 @@ def _create_draft_once(payload: dict) -> str:
         if type(code) is not int:
             raise DraftOutcomeUnknown(unknown)
         if code != 0:
-            raise RuntimeError(f"草稿创建被微信拒绝 [{code}]，未自动重试。")
+            raise DraftRejected(f"草稿创建被微信拒绝 [{code}]，未自动重试。")
         media_id = data.get("media_id")
         if not isinstance(media_id, str) or not media_id.strip() or len(media_id) > 512:
             raise DraftOutcomeUnknown(unknown)
