@@ -1,7 +1,6 @@
 import argparse
 import json
 import requests
-from bs4 import BeautifulSoup
 import sys
 import time
 import re
@@ -15,9 +14,14 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 }
 
-from bs4 import XMLParsedAsHTMLWarning
-import warnings
-warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
+def _beautiful_soup():
+    try:
+        from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning
+        import warnings
+        warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
+        return BeautifulSoup
+    except ImportError as exc:
+        sys.exit(f"错误：缺少依赖 bs4，请先安装 beautifulsoup4：{exc}")
 
 
 def filter_by_hours(items, hours=48):
@@ -55,7 +59,7 @@ def fetch_url_content(url):
     try:
         response = requests.get(url, headers=HEADERS, timeout=5)
         response.raise_for_status()
-        soup = BeautifulSoup(response.content, 'html.parser')
+        soup = _beautiful_soup()(response.content, 'html.parser')
         for tag in soup(["script", "style", "nav", "footer", "header"]):
             tag.extract()
         text = soup.get_text(separator=' ', strip=True)
@@ -87,7 +91,7 @@ def fetch_36kr(limit=10, keyword=None):
     """36氪快讯 — 创投 / 科技 / 商业动态。"""
     try:
         response = requests.get("https://36kr.com/newsflashes", headers=HEADERS, timeout=10)
-        soup = BeautifulSoup(response.text, 'html.parser')
+        soup = _beautiful_soup()(response.text, 'html.parser')
         items = []
         for item in soup.select('.newsflash-item'):
             title_tag = item.select_one('.item-title')
@@ -149,14 +153,13 @@ def fetch_tencent(limit=10, keyword=None):
         return []
 
 
-# --- RSS 中文源 ---
-
-from rss_parser import fetch_rss_feed
-
-
 def create_single_rss_fetcher(url, name, hours=None):
     """构造单个 RSS 源抓取器。hours 非空时按时间窗口过滤。"""
     def fetcher(limit=10, keyword=None):
+        try:
+            from rss_parser import fetch_rss_feed
+        except ImportError as exc:
+            sys.exit(f"错误：缺少 RSS 解析依赖，请先安装 beautifulsoup4/feedparser：{exc}")
         raw = fetch_rss_feed(url, name, max(limit * 4, 30))
         if hours:
             raw = filter_by_hours(raw, hours=hours)
@@ -242,9 +245,13 @@ def main():
     if args.source == 'all':
         to_run = list(sources_map.values())
     else:
-        for s in [x.strip() for x in args.source.split(',')]:
-            if s in sources_map:
-                to_run.append(sources_map[s])
+        requested = [x.strip() for x in args.source.split(',') if x.strip()]
+        unknown = [s for s in requested if s not in sources_map]
+        if unknown:
+            valid = ', '.join(sources_map)
+            sys.exit(f"错误：未知 source key：{', '.join(unknown)}。可用 key：{valid}")
+        for s in requested:
+            to_run.append(sources_map[s])
 
     def run_fetchers(fetchers, limit, kw):
         res = []

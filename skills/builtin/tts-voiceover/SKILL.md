@@ -77,16 +77,16 @@ python skills/shared/scripts/tts.py speak --text "……" \
 配音出来后按需接下游脚本，无需在本 SKILL 重造能力：
 
 ```bash
-# ① 配音 + BGM 混音（原声 1.0 / BGM 0.3）→ 用 audio_ops concat / video_ops bgm
-python skills/shared/scripts/video_ops.py bgm -i vo.mp3 -o vo_bgm.mp3 \
-  --music bgm.mp3 --voice-volume 1.0 --music-volume 0.3
+# ① 音频文件内配音 + BGM 混音（配音 1.0 / BGM 0.3）→ 用 audio_mix.py
+python skills/shared/scripts/audio_mix.py mix --voice vo.mp3 --bgm bgm.mp3 \
+  --voice-volume 1.0 --bgm-volume 0.3 -o vo_bgm.mp3
 
 # ② 配音音量归一化到社媒响度（-14 LUFS）
 python skills/shared/scripts/audio_ops.py normalize vo.mp3 -o vo_norm.mp3
 
 # ③ 把配音作为旁白加到视频
 python skills/shared/scripts/video_ops.py bgm -i clip.mp4 -o clip_vo.mp4 \
-  --music vo.mp3 --voice-volume 0.4 --music-volume 1.0
+  --music vo.mp3 --voice-volume 0.4 --music-volume 1.0 --music-loop-off
 ```
 
 ## 常用中文音色

@@ -77,7 +77,10 @@ def main() -> None:
         sys.exit(1)
     entries = [g for g in cfg.get("gates", [])
                if args.phase == "all" or g.get("phase", "verify") == args.phase]
-    # {run_dir} / {out_dir} 占位符替换（手写 gates.json 也可直接用占位符）
+    if not entries:
+        write_reports(rd, merged, note=f"{args.phase} 阶段无质量门——不算通过")
+        sys.exit(1)
+    # {run_dir} / {out_dir} / {python} 占位符替换（手写 gates.json 也可直接用占位符）
     _outd = ""
     _stp = rd / "run-state.json"
     if _stp.is_file():
@@ -87,9 +90,10 @@ def main() -> None:
             _outd = ""
     for _g in entries:
         _cmd = _g.get("cmd")
-        if isinstance(_cmd, str) and ("{run_dir}" in _cmd or "{out_dir}" in _cmd):
+        if isinstance(_cmd, str) and any(x in _cmd for x in ("{run_dir}", "{out_dir}", "{python}")):
             _g["cmd"] = (_cmd.replace("{run_dir}", str(rd).replace("\\", "/"))
-                             .replace("{out_dir}", str(_outd).replace("\\", "/")))
+                             .replace("{out_dir}", str(_outd).replace("\\", "/"))
+                             .replace("{python}", sys.executable.replace("\\", "/")))
     results = []
     for g in entries:
         gid, title = g.get("id", "gate"), g.get("title", g.get("id", "gate"))

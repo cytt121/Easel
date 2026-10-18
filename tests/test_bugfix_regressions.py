@@ -312,3 +312,215 @@ def test_gemini_adapter_non_streaming_finish_reason():
     data["candidates"] = [{"finishReason": "STOP", "content": {"parts": [
         {"functionCall": {"name": "f", "args": {}}}]}}]
     assert adapter.gemini_to_openai(data, "m")["choices"][0]["finish_reason"] == "tool_calls"
+
+# ── issue #110：未知新闻源不能静默成功 ────────────────────────────────
+def test_news_fetch_rejects_unknown_source(monkeypatch):
+    import types
+    fake_bs4 = types.ModuleType("bs4")
+    fake_bs4.BeautifulSoup = lambda *args, **kwargs: None
+    fake_bs4.XMLParsedAsHTMLWarning = UserWarning
+    monkeypatch.setitem(sys.modules, "bs4", fake_bs4)
+    scripts_dir = (
+        Path(__file__).resolve().parents[1]
+        / "skills" / "builtin" / "skill-news-intelligence" / "scripts"
+    )
+    monkeypatch.syspath_prepend(str(scripts_dir))
+    fetch_news = _load("fetch_news_source_guard", scripts_dir / "fetch_news.py")
+    monkeypatch.setattr(sys, "argv", ["fetch_news.py", "--source", "rss", "--no-save"])
+    with pytest.raises(SystemExit) as exc:
+        fetch_news.main()
+    assert exc.value.code != 0
+    assert "未知 source key" in str(exc.value)
+
+
+# ── issue #112：涨粉分析兼容中英文平台、时区与缺失指标 ────────────────
+def test_publish_analytics_growth_normalizes_platform_timezone_and_missing_metrics():
+    analyze = _load(
+        "publish_analytics_growth_fix",
+        Path(__file__).resolve().parents[1]
+        / "skills" / "builtin" / "skill-publish-analytics" / "scripts" / "analyze.py",
+    )
+    entries = [
+        {
+            "id": "p1",
+            "title": "自动记录",
+            "platform": "小红书",
+            "profile": "达人",
+            "published_at": "2026-07-01T08:00:00+08:00",
+            "initial_metrics": {},
+        },
+        {
+            "id": "p2",
+            "title": "无 profile 发布",
+            "platform": "小红书",
+            "profile": "",
+            "published_at": "2026-07-01T09:00:00+08:00",
+            "initial_metrics": {"likes": 10},
+        },
+    ]
+    follower_data = {"snapshots": [
+        {"recorded_at": "2026-07-01", "followers": 100, "platform": "xiaohongshu", "profile": "达人"},
+        {"recorded_at": "2026-07-02", "followers": 130, "platform": "xiaohongshu", "profile": "达人"},
+        {"recorded_at": "2026-07-02", "followers": 150, "platform": "xiaohongshu", "profile": "另一个"},
+    ]}
+    out = analyze.analyze_growth(entries, follower_data)
+    by_id = {row["id"]: row for row in out["ranking"]}
+    assert by_id["p1"]["delta_24h"] == 30
+    assert by_id["p2"]["delta_24h"] in {30, 50}
+    assert analyze._score({"initial_metrics": {}}) is None
+
+
+# ── issue #112：自动发布记录必须透传 profile 到归因日志 ───────────────
+def test_calendar_record_publish_forwards_profile_to_publish_log(monkeypatch, tmp_path):
+    calendar_ops = _load("calendar_ops_profile_forward_fix", SHARED / "calendar_ops.py")
+    data = tmp_path / "schedule.json"
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(calendar_ops.subprocess, "run", fake_run)
+    ok = calendar_ops.record_publish(
+        "xiaohongshu", "自动记录", tags="AI", ptype="图文", note="正文", source="publish-page",
+        profile="达人", data_path=data, forward_log=True,
+    )
+    assert ok is True
+    item = json.loads(data.read_text(encoding="utf-8"))[0]
+    assert item["profile"] == "达人"
+    assert "--profile" in calls[-1]
+    assert calls[-1][calls[-1].index("--profile") + 1] == "达人"
+    assert calls[-1][calls[-1].index("--tags") + 1] == "AI"
+    assert calls[-1][calls[-1].index("--type") + 1] == "图文"
+
+
+# ── issue #117：依赖导入 SystemExit 也要转成安装提示码 3 ───────────────
+def test_remove_bg_rembg_import_systemexit_becomes_dependency_exit(monkeypatch):
+    remove_bg = _load("remove_bg_dependency_guard", SHARED / "remove_bg.py")
+    import builtins
+
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "rembg":
+            raise SystemExit(1)
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    with pytest.raises(SystemExit) as exc:
+        remove_bg._require_rembg()
+    assert exc.value.code == 3
+
+
+# ── issue #119：bgm 可关闭 music 循环，短旁白补静音到视频长度 ──────────
+def test_video_bgm_music_loop_off_uses_apad_without_stream_loop(monkeypatch, tmp_path):
+    video_ops = _load("video_ops_bgm_loop_off_fix", SHARED / "video_ops.py")
+    captured = []
+    src = tmp_path / "clip.mp4"
+    music = tmp_path / "vo.mp3"
+    out = tmp_path / "out.mp4"
+    monkeypatch.setattr(video_ops, "_require_input", lambda value: Path(value))
+    monkeypatch.setattr(video_ops, "_prep_out", lambda value: Path(value))
+    monkeypatch.setattr(video_ops, "_has_audio", lambda _path: True)
+    monkeypatch.setattr(video_ops, "_run", lambda cmd: captured.append(cmd))
+    monkeypatch.setattr(video_ops, "_done", lambda _out: None)
+
+    video_ops.cmd_bgm(SimpleNamespace(
+        input=str(src), music=str(music), output=str(out),
+        voice_volume=0.4, music_volume=1.0, music_loop_off=True,
+    ))
+    cmd = captured[-1]
+    graph = cmd[cmd.index("-filter_complex") + 1]
+    assert "-stream_loop" not in cmd
+    assert "apad" in graph
+
+    video_ops.cmd_bgm(SimpleNamespace(
+        input=str(src), music=str(music), output=str(out),
+        voice_volume=0.4, music_volume=1.0, music_loop_off=False,
+    ))
+    cmd = captured[-1]
+    assert cmd[cmd.index("-stream_loop") + 1] == "-1"
+
+
+# ── issue #120：空质量门失败，{python} 占位符可替换 ──────────────────
+def test_video_pipeline_gates_empty_phase_fails_and_python_placeholder(monkeypatch, tmp_path):
+    aggregate = _load(
+        "video_gate_aggregate_fix",
+        Path(__file__).resolve().parents[1]
+        / "skills" / "builtin" / "video-production" / "vendor" / "video-pipeline-sdk"
+        / "gates" / "aggregate.py",
+    )
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "gates.json").write_text(json.dumps({"gates": []}), encoding="utf-8")
+    monkeypatch.setattr(sys, "argv", ["aggregate.py", "--run-dir", str(run_dir), "--phase", "verify"])
+    with pytest.raises(SystemExit) as exc:
+        aggregate.main()
+    assert exc.value.code == 1
+    assert "无质量门" in (run_dir / "gate-report.json").read_text(encoding="utf-8")
+
+    (run_dir / "gates.json").write_text(json.dumps({"gates": [
+        {"id": "py", "title": "py", "phase": "verify", "cmd": "{python} -c pass"}
+    ]}), encoding="utf-8")
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(aggregate.subprocess, "run", fake_run)
+    monkeypatch.setattr(sys, "argv", ["aggregate.py", "--run-dir", str(run_dir), "--phase", "verify"])
+    with pytest.raises(SystemExit) as exc:
+        aggregate.main()
+    assert exc.value.code == 0
+    assert sys.executable in calls[-1][-1]
+
+
+def test_video_pipeline_stage_respects_empty_gate_failure(monkeypatch, tmp_path):
+    run_mod = _load(
+        "video_pipeline_run_empty_gate_fix",
+        Path(__file__).resolve().parents[1]
+        / "skills" / "builtin" / "video-production" / "vendor" / "video-pipeline-sdk"
+        / "pipeline" / "run.py",
+    )
+    run_dir = tmp_path / "run"
+    (run_dir / "logs").mkdir(parents=True)
+    (run_dir / "gates.json").write_text(json.dumps({"gates": []}), encoding="utf-8")
+    status, message = run_mod.st_verify({"rd": run_dir})
+    assert status == "gatefail"
+    assert "质量门" in message
+
+    (run_dir / "gates.json").write_text(json.dumps({"gates": [
+        {"id": "only-verify", "phase": "verify", "cmd": "true"}
+    ]}), encoding="utf-8")
+    (run_dir / "workdir" / "out").mkdir(parents=True)
+    (run_dir / "workdir" / "out" / "final.mp4").write_bytes(b"fake")
+    (run_dir / "run-state.json").write_text(json.dumps({"stages": {}}), encoding="utf-8")
+    status, message = run_mod.st_render({"rd": run_dir, "state": {}})
+    assert status == "gatefail"
+    assert "质量门" in message
+
+
+# ── issue #122：loudnorm 后恢复输入采样率 ─────────────────────────────
+def test_audio_ops_loudnorm_restores_input_sample_rate(monkeypatch, tmp_path):
+    audio_ops = _load("audio_ops_sample_rate_fix", SHARED / "audio_ops.py")
+    captured = []
+    inp = tmp_path / "in.wav"
+    out = tmp_path / "out.wav"
+    monkeypatch.setattr(audio_ops, "_check_input", lambda value: Path(value))
+    monkeypatch.setattr(audio_ops, "_prep_output", lambda value: Path(value))
+    monkeypatch.setattr(audio_ops, "_summary", lambda _path: {"sample_rate": "44100"})
+    monkeypatch.setattr(audio_ops, "_run_ffmpeg", lambda cmd, quiet=False: captured.append(cmd))
+    monkeypatch.setattr(audio_ops, "_report", lambda _path: None)
+
+    audio_ops.cmd_normalize(SimpleNamespace(
+        input=str(inp), output=str(out), i=-14.0, tp=-1.5, lra=11.0, bitrate=None,
+    ))
+    assert any("loudnorm=" in part and "aresample=44100" in part for part in captured[-1])
+
+    monkeypatch.setattr(audio_ops, "_ensure_rnnoise_model", lambda _model: "model.rnnn")
+    monkeypatch.setattr(audio_ops, "_probe", lambda _path: {"streams": [{"codec_type": "audio"}]})
+    audio_ops.cmd_denoise(SimpleNamespace(
+        input=str(inp), output=str(out), tier=3, model="model.rnnn", mix=1.0,
+    ))
+    assert any("arnndn" in part and "aresample=44100" in part for part in captured[-1])

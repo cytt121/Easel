@@ -39,7 +39,7 @@ python skills/shared/scripts/web_publisher.py whoami --platform weixin-channels
 
 ```json
 {
-  "logged_in": true,
+  "loggedIn": true,
   "nickname": "昵称",
   "followers": 12345, "likes": 67890, "following": 200, "posts": 42,
   "notes": [ {"title": "帖子标题", "url": "https://...", "cover": "封面URL", "stat": "赞/评/播放",
@@ -65,7 +65,7 @@ python skills/shared/scripts/account_stats.py fetch --platform weixin-channels
 - "我多少粉丝 / 获赞" → `followers` / `likes`（拿不到显示"—"，不编）。
 - "我最近发了什么 / 最近的帖子是什么" → `notes[0]`（列表通常按时间倒序），给标题 + 链接。
 - "我有哪些帖子 / 都发过什么" → 遍历 `notes`，列标题 + 链接（+ 每条 `stat`）。
-- `logged_in=false` → 提示去账号页扫码，别继续硬答。
+- `loggedIn=false` → 提示去账号页扫码，别继续硬答。
 
 ## 3. 各平台数据完整度（真机现状，如实告知用户）
 

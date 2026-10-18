@@ -65,9 +65,9 @@ cast 里角色：`--engine clone --provider openai-compatible --voice-id FunAudi
 ```bash
 python skills/shared/scripts/multivoice.py cast init  --cast <路径>/cast.json
 python skills/shared/scripts/multivoice.py cast add   --cast <路径>/cast.json \
-    --name 林策 --role male_lead --voice zh-CN-YunxiNeural --rate=-5% --pitch=-3Hz --note "冷峻男主"   # 负值参数用等号
+    --name 林策 --role male_lead --engine edge --voice zh-CN-YunxiNeural --rate=-5% --pitch=-3Hz --note "冷峻男主"   # 负值参数用等号
 python skills/shared/scripts/multivoice.py cast add   --cast <路径>/cast.json \
-    --name 苏晚 --role female_lead --voice zh-CN-XiaoxiaoNeural --note "温婉女主"
+    --name 苏晚 --role female_lead --engine edge --voice zh-CN-XiaoxiaoNeural --note "温婉女主"
 python skills/shared/scripts/multivoice.py cast check --cast <路径>/cast.json    # 校验：音色有效/旁白独立/无撞音色
 ```
 > cast.json 也可直接写（就是 JSON）。想让某角色**像真人有情绪**（治 AI 平读）→ 该角色用云 provider：

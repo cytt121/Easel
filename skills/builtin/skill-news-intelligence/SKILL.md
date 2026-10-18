@@ -68,7 +68,7 @@ layer: discover
 ### Step 2 — 抓取数据
 
 ```bash
-python3 skills/builtin/skill-news-intelligence/scripts/fetch_news.py --source rss --limit 20 --keyword AI --no-save
+python3 skills/builtin/skill-news-intelligence/scripts/fetch_news.py --source aihot,infoq_cn --limit 20 --keyword AI --no-save
 ```
 
 参数：`--source` 源 key（逗号分隔，`all` 抓全部）；`--limit` 每源条数；
@@ -93,7 +93,7 @@ python3 skills/builtin/skill-news-intelligence/scripts/fetch_news.py --source rs
 一键生成预设赛道简报：
 
 ```bash
-python3 skills/builtin/skill-news-intelligence/scripts/daily_briefing.py --profile 科技账号 --no-save
+python3 skills/builtin/skill-news-intelligence/scripts/daily_briefing.py --profile tech_digital --no-save
 ```
 
 | Profile | 用途 | 包含源 |

@@ -382,6 +382,8 @@ def st_verify(ctx: dict) -> tuple[str, str]:
     fails = _gate_fails(rd, "verify")
     if fails is None:
         return "error", f"门聚合未产出报告（exit {code}）：{out[-300:]}"
+    if code != 0 and not fails:
+        return "gatefail", f"验证层质量门未通过：{out[-300:] or '无可执行质量门'}（报告：{rd / 'gate-report.md'}）"
     if not fails and not (rd / "gates.json").is_file():
         return "error", "未配置质量门（gates.json 缺失）——门不过不交付"
     if fails:
@@ -453,9 +455,11 @@ def st_render(ctx: dict) -> tuple[str, str]:
         })
         return "await", "待渲染"
     # 渲染后门（响度 / 同步等）
-    run_cmd([sys.executable, str(SDK_ROOT / "gates" / "aggregate.py"), "--run-dir", str(rd), "--phase", "render"],
-            log_path=rd / "logs" / "render-gates.log")
+    code, out = run_cmd([sys.executable, str(SDK_ROOT / "gates" / "aggregate.py"), "--run-dir", str(rd), "--phase", "render"],
+                        log_path=rd / "logs" / "render-gates.log")
     fails = _gate_fails(rd, "render") or []
+    if code != 0 and not fails:
+        return "gatefail", f"渲染后质量门未通过：{out[-300:] or '无可执行质量门'}"
     if fails:
         return "gatefail", f"渲染后门失败：{', '.join(g.get('id', '?') for g in fails)}"
     return "done", "渲染完成（渲染后门通过）"

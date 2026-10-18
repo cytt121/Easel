@@ -225,7 +225,7 @@ export default function PublishPage({ persona }: PublishPageProps) {
       }
       setPub((r) => ({ ...r, [t.key]: { status: 'publishing', msg: '发布中…可能需 1-2 分钟' } }));
       try {
-        const res = await publishNow(t.key, { title, body: effective(t.key), media: selectedMedia, tags });
+        const res = await publishNow(t.key, { title, body: effective(t.key), media: selectedMedia, tags, persona });
         if (res.async) {
           // 抖音：异步发布，轮询状态；风控触发短信墙时弹输入框（条件触发，没触发就直接跑完）
           await pollAsyncPublish(t.key, t.label);

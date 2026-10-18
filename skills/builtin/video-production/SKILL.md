@@ -109,7 +109,7 @@ python <ROOT>/skills/builtin/video-production/scripts/video_pipeline.py resume
 | `status` | 进度 / 待作答 / 路径 |
 
 所有命令支持 `--run-dir`（默认最近一次 start）、`--base`（运行态根）、`--sdk`（SDK 路径；默认用内置 `vendor/video-pipeline-sdk`，也可用 `--sdk`/环境变量 `VIDEO_PIPELINE_SDK` 覆盖）。
-`--gates` 可带质量门清单 JSON（内部支持 `{run_dir}` / `{out_dir}` 占位符自动替换）。
+默认自动使用内置质量门清单；`--gates` 可覆盖为自定义 JSON（内部支持 `{run_dir}` / `{out_dir}` / `{python}` 占位符自动替换）。空门单或当前阶段无门会失败，不算通过。
 
 ## 产物
 

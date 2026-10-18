@@ -965,7 +965,16 @@ def _selftest() -> int:
     return 0 if ok else 1
 
 
+def _load_default_env() -> None:
+    try:
+        import ai_video
+        ai_video.load_env_file(ai_video.find_default_env_file())
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def main() -> int:
+    _load_default_env()
     ap = argparse.ArgumentParser(
         description="多角色/对话配音引擎（cast + lines → 多声线 voice.mp3 + srt）",
         formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__)

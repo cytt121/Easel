@@ -5131,6 +5131,7 @@ class PublishRequest(BaseModel):
     body: str = ''
     media: list[str] = []
     tags: str = ''
+    persona: str = ''
 
 
 class ManualPublishRequest(BaseModel):
@@ -5187,11 +5188,27 @@ def _read_publish_status(platform: str) -> dict:
     return {'state': 'unknown', 'message': ''}
 
 
+def _record_successful_publish(title: str, body: str, cfg: dict, profile: str = '',
+                               tags: str = '', ptype: str = '') -> None:
+    try:
+        scripts_dir = str(SHARED_SCRIPTS)
+        if scripts_dir not in sys.path:
+            sys.path.insert(0, scripts_dir)
+        import calendar_ops
+        with _schedule_lock():
+            calendar_ops.record_publish(cfg['name'], title, note=body[:200],
+                                        tags=tags, ptype=ptype,
+                                        source='publish-page', profile=profile,
+                                        data_path=SCHEDULE_FILE, forward_log=True)
+    except Exception:
+        pass
+
+
 def _run_publish_bg(platform: str, cmd: list, title: str, body: str, cfg: dict,
-                    status_file: Path, code_file: Path) -> None:
+                    status_file: Path, code_file: Path, profile: str = '',
+                    tags: str = '', ptype: str = '') -> None:
     """后台线程跑发布脚本（脚本自身把 starting/sms_required/verifying/success/error 写进 status_file）。
     结束后兜底补写终态 + 记 _publish.log + 成功则回流排期。"""
-    _SCHEDULE_LOCK = _schedule_lock()
     ok = False
     out = err = ''
     try:
@@ -5218,20 +5235,12 @@ def _run_publish_bg(platform: str, cmd: list, title: str, body: str, cfg: dict,
     except OSError:
         pass
     if ok:
-        try:
-            with _SCHEDULE_LOCK:
-                items = _read_schedule()
-                items.append({'id': uuid.uuid4().hex[:12], 'title': title,
-                              'date': time.strftime('%Y-%m-%d'), 'platform': cfg['name'],
-                              'time': time.strftime('%H:%M'), 'status': 'published', 'note': body[:200],
-                              'kind': 'content', 'source': 'publish-page'})
-                _write_schedule(items)
-        except Exception:
-            pass
+        _record_successful_publish(title, body, cfg, profile, tags, ptype)
 
 
 def _start_async_publish(platform: str, cmd: list, title: str, body: str, cfg: dict,
-                         status_file: Path, code_file: Path) -> dict:
+                         status_file: Path, code_file: Path, profile: str = '',
+                         tags: str = '', ptype: str = '') -> dict:
     """启动异步发布：清旧码/状态 → 起后台线程 → 立即返回。前端轮询 /api/publish/{p}/status，
     遇 sms_required 弹输入框、提交到 /api/publish/{p}/sms。"""
     try:
@@ -5240,7 +5249,7 @@ def _start_async_publish(platform: str, cmd: list, title: str, body: str, cfg: d
         pass
     _write_publish_status(status_file, 'starting', '发布中…（若触发风控会要求短信验证）')
     threading.Thread(target=_run_publish_bg,
-                     args=(platform, cmd, title, body, cfg, status_file, code_file),
+                     args=(platform, cmd, title, body, cfg, status_file, code_file, profile, tags, ptype),
                      daemon=True).start()
     # 关键：**不返回 ok:true**——这只是「已启动」的应答，真正结果要靠轮询 /status。
     # 若这里给 ok:true，旧前端会把它当「已发布」立刻显示成功（假成功 bug，真机踩过）。
@@ -5279,6 +5288,9 @@ async def api_publish(platform: str, req: PublishRequest):
     backend = cfg['backend']
     if backend == 'unsupported':
         raise HTTPException(400, f"{cfg['name']} 暂不支持一键发布")
+    profile = (req.persona or '').strip()
+    if profile and (not valid_persona_name(profile) or not profile_exists(profile)):
+        raise HTTPException(400, '选择的画像不存在或名称非法')
     if not req.title.strip() and not req.body.strip():
         raise HTTPException(400, '标题/正文不能为空')
     imgs, vids = [], []
@@ -5297,6 +5309,7 @@ async def api_publish(platform: str, req: PublishRequest):
         raise HTTPException(400, f"{cfg['name']} 只能发视频，请附带一个视频文件")
     title = req.title.strip() or req.body.strip()[:20]
     tags = req.tags or ''
+    publish_type = '视频' if vids else ('文章' if platform == 'wechat-oa' else '图文')
     py = sys.executable
     if platform == 'xiaohongshu':
         base = [py, str(SHARED_SCRIPTS / 'xhs_publish.py')]
@@ -5319,7 +5332,8 @@ async def api_publish(platform: str, req: PublishRequest):
         status_file = PUBLISH_DIR / 'douyin.json'
         code_file = PUBLISH_DIR / 'douyin.code'
         cmd += ['--status-file', str(status_file), '--sms-code-file', str(code_file)]
-        return _start_async_publish(platform, cmd, title, req.body, cfg, status_file, code_file)
+        return _start_async_publish(platform, cmd, title, req.body, cfg, status_file, code_file,
+                                    profile, tags, publish_type)
     elif platform == 'wechat-oa':
         # 微信公众号：走「后台会话」发布（免 AppID/AppSecret、免 IP 白名单）。
         # 正文 MD → 公众号 HTML（skill 排版器）→ 会话建草稿（weixin_mp_stats.py publish，内嵌图传 mp CDN）。
@@ -5376,18 +5390,7 @@ async def api_publish(platform: str, req: PublishRequest):
     except Exception:
         pass
     if ok:
-        try:
-            # 读-改-写加锁：与后台线程的异步发布回流（_run_publish_bg）并发时，
-            # 不加锁会互相覆盖丢记录。
-            with _schedule_lock():
-                items = _read_schedule()
-                items.append({'id': uuid.uuid4().hex[:12], 'title': title,
-                              'date': time.strftime('%Y-%m-%d'), 'platform': cfg['name'],
-                              'time': time.strftime('%H:%M'), 'status': 'published',
-                              'note': req.body[:200], 'kind': 'content', 'source': 'publish-page'})
-                _write_schedule(items)
-        except Exception:
-            pass
+        _record_successful_publish(title, req.body, cfg, profile, tags, publish_type)
     return {'ok': ok, 'message': '发布成功' if ok else '发布失败（见 detail）', 'detail': detail}
 
 

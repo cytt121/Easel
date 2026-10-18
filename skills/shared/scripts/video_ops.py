@@ -484,21 +484,23 @@ def cmd_bgm(a) -> int:
     music = _require_input(a.music)
     out = _prep_out(a.output)
     src_has_audio = _has_audio(src)
+    music_input = ["-i", str(music)] if a.music_loop_off else ["-stream_loop", "-1", "-i", str(music)]
+    music_filter = f"[1:a]volume={a.music_volume}" + (",apad" if a.music_loop_off else "")
     if src_has_audio:
-        # 原声 + BGM 混音，各自音量可调；BGM 循环并在视频结束时截断
+        # 原声 + BGM 混音，各自音量可调；默认 BGM 循环并在视频结束时截断。
         filt = (
             f"[0:a]volume={a.voice_volume}[a0];"
-            f"[1:a]volume={a.music_volume}[a1];"
+            f"{music_filter}[a1];"
             f"[a0][a1]amix=inputs=2:duration=first:dropout_transition=2[a]"
         )
-        cmd = ["ffmpeg", "-y", "-i", str(src), "-stream_loop", "-1", "-i", str(music),
+        cmd = ["ffmpeg", "-y", "-i", str(src), *music_input,
                "-filter_complex", filt, "-map", "0:v", "-map", "[a]",
                "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
                "-shortest", str(out)]
     else:
-        # 视频无声：直接把 BGM 作为音轨
-        cmd = ["ffmpeg", "-y", "-i", str(src), "-stream_loop", "-1", "-i", str(music),
-               "-filter_complex", f"[1:a]volume={a.music_volume}[a]",
+        # 视频无声：直接把 BGM/旁白作为音轨；--music-loop-off 时尾部补静音到视频长度。
+        cmd = ["ffmpeg", "-y", "-i", str(src), *music_input,
+               "-filter_complex", f"{music_filter}[a]",
                "-map", "0:v", "-map", "[a]", "-c:v", "copy",
                "-c:a", "aac", "-b:a", "192k", "-shortest", str(out)]
     _run(cmd)
@@ -758,6 +760,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--music", required=True, help="BGM 音频文件")
     p.add_argument("--voice-volume", type=float, default=1.0, help="原声音量（默认 1.0）")
     p.add_argument("--music-volume", type=float, default=0.3, help="BGM 音量（默认 0.3）")
+    p.add_argument("--music-loop-off", action="store_true",
+                   help="不要循环 --music；短于视频时尾部补静音（旁白叠加场景使用）")
     p.set_defaults(func=cmd_bgm)
 
     # watermark

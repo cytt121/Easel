@@ -6,6 +6,7 @@ easel.openclaw_workspace.config_path()，doctor._openclaw_config_path() 仍自�
 doctor 返回 Path("")/"openclaw.json"（相对路径，随当前工作目录漂移），
 config_path() 会正确回落默认 profile 目录。统一委托后由本文件钉住。
 """
+import json
 import sys
 from pathlib import Path
 
@@ -39,3 +40,47 @@ def test_doctor_no_direct_path_concat():
     src = (PROJECT_ROOT / "easel" / "commands" / "doctor.py").read_text(encoding="utf-8")
     assert 'Path.home() / ".openclaw-easel"' not in src
     assert "Path.home() / '.openclaw-easel'" not in src
+
+
+def _write_openclaw_config(path, primary):
+    path.write_text(
+        json.dumps({
+            "agents": {"defaults": {"model": {"primary": primary}}},
+            "models": {"providers": {primary.split('/', 1)[0]: {"baseURL": "http://localhost"}}},
+        }),
+        encoding="utf-8",
+    )
+
+
+@pytest.mark.parametrize(
+    ("primary", "cli"),
+    [
+        ("claude-cli/claude-sonnet-4-5", "claude"),
+        ("google-gemini-cli/gemini-2.5-pro", "gemini"),
+    ],
+)
+def test_doctor_accepts_logged_in_agent_cli_without_api_key(tmp_path, monkeypatch, primary, cli):
+    import easel.commands.doctor as doctor
+
+    monkeypatch.setenv("EASEL_OPENCLAW_STATE_DIR", str(tmp_path))
+    monkeypatch.setattr(doctor, "PROJECT_ROOT", tmp_path)
+    (tmp_path / ".env").write_text("ANTHROPIC_API_KEY=REPLACE_ME\n", encoding="utf-8")
+    _write_openclaw_config(tmp_path / "openclaw.json", primary)
+    monkeypatch.setattr(doctor.shutil, "which", lambda cmd: f"/usr/bin/{cmd}" if cmd == cli else None)
+
+    assert doctor._env_key_valid() is True
+    assert doctor._primary_model_routable() == (True, "")
+
+
+def test_doctor_reports_missing_agent_cli(tmp_path, monkeypatch):
+    import easel.commands.doctor as doctor
+
+    monkeypatch.setenv("EASEL_OPENCLAW_STATE_DIR", str(tmp_path))
+    monkeypatch.setattr(doctor, "PROJECT_ROOT", tmp_path)
+    (tmp_path / ".env").write_text("ANTHROPIC_API_KEY=REPLACE_ME\n", encoding="utf-8")
+    _write_openclaw_config(tmp_path / "openclaw.json", "claude-cli/claude-sonnet-4-5")
+    monkeypatch.setattr(doctor.shutil, "which", lambda _cmd: None)
+
+    ok, detail = doctor._primary_model_routable()
+    assert ok is False
+    assert "Claude Code CLI" in detail

@@ -19,7 +19,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "shared" / "scripts"))
@@ -31,6 +31,19 @@ DEFAULT_FOLLOWER = PROJECT_ROOT / "outputs" / "_analytics" / "follower-log.json"
 LEGACY_DATA = PROJECT_ROOT / "outputs" / "publish-log.json"
 LEGACY_FOLLOWER = PROJECT_ROOT / "outputs" / "follower-log.json"
 METRIC_KEYS = ("views", "likes", "comments", "shares")
+LOCAL_TZ = timezone(timedelta(hours=8))
+PLATFORM_ALIASES = {
+    "小红书": "xiaohongshu",
+    "redbook": "xiaohongshu",
+    "xhs": "xiaohongshu",
+    "xiaohongshu": "xiaohongshu",
+    "抖音": "douyin",
+    "douyin": "douyin",
+    "视频号": "wechat_channels",
+    "wechat_channels": "wechat_channels",
+    "公众号": "wechat",
+    "wechat": "wechat",
+}
 
 TIME_BUCKETS = [
     ("早晨", range(6, 9)), ("上午", range(9, 12)), ("午间", range(12, 14)),
@@ -51,9 +64,17 @@ def load(path: Path, what: str) -> dict:
 
 def _parse_dt(s):
     try:
-        return datetime.fromisoformat(s)
+        dt = datetime.fromisoformat(str(s))
     except (ValueError, TypeError):
         return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=LOCAL_TZ)
+    return dt.astimezone(LOCAL_TZ)
+
+
+def _platform_key(value):
+    raw = (value or "").strip()
+    return PLATFORM_ALIASES.get(raw, raw)
 
 
 def _bucket(hour):
@@ -68,7 +89,10 @@ def _m(entry, key):
 
 
 def _score(entry):
-    return ss.engagement_score(**{k: _m(entry, k) for k in METRIC_KEYS})
+    metrics = {k: _m(entry, k) for k in METRIC_KEYS}
+    if all(v is None for v in metrics.values()):
+        return None
+    return ss.engagement_score(**metrics)
 
 
 def _filter_profile(entries, profile):
@@ -196,11 +220,12 @@ def analyze_growth(entries, follower_data):
     for s in snaps:
         dt = _parse_dt(s.get("recorded_at", ""))
         if dt and s.get("followers") is not None:
-            parsed.append((dt, s.get("followers"), s.get("platform"), s.get("profile")))
+            parsed.append((dt, s.get("followers"), _platform_key(s.get("platform")), s.get("profile")))
     parsed.sort(key=lambda x: x[0])
 
     def followers_at(before_dt, platform, profile, after=False, within=None):
         """after=False: 取 before_dt 前最近；after=True: 取窗口内最近一个。"""
+        platform = _platform_key(platform)
         cand = [(dt, f) for dt, f, pf, pr in parsed
                 if pf == platform and (not profile or pr == profile)]
         if after:
@@ -256,11 +281,16 @@ def _selftest() -> int:
     assert c["winners"] and any(r["type"] == "视频" for r in c["by_type"]), "types 结果异常"
     # growth：合成 follower-log
     fdata = {"snapshots": [
-        {"recorded_at": "2026-07-02T00:00:00", "followers": 1000, "platform": "小红书", "profile": "达人"},
-        {"recorded_at": "2026-07-03T00:00:00", "followers": 1200, "platform": "小红书", "profile": "达人"},
+        {"recorded_at": "2026-07-01", "followers": 1000, "platform": "xiaohongshu", "profile": "达人"},
+        {"recorded_at": "2026-07-02", "followers": 1200, "platform": "xiaohongshu", "profile": "达人"},
+        {"recorded_at": "2026-07-03", "followers": 1500, "platform": "xiaohongshu", "profile": "达人"},
     ]}
+    entries[0]["published_at"] = "2026-07-01T08:30:00+08:00"
     d = analyze_growth(entries, fdata)
-    assert "ranking" in d, "growth 结果异常"
+    assert "ranking" in d and d["ranking"], "growth 结果异常"
+    first = next(r for r in d["ranking"] if r["id"] == 1)
+    assert first["delta_24h"] == 200, "growth 平台/时区匹配异常"
+    assert _score({"initial_metrics": {}}) is None, "缺指标不能计为 0 分"
     # _summary 结构
     s = _summary(entries)
     assert s["total"] == 3 and s["platforms"] == ["小红书"], "summary 异常"

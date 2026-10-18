@@ -27,7 +27,7 @@ layer: general
 | 依赖 | 说明 |
 |------|------|
 | playwright + chromium 内核 | `account_stats.py check` 验证 |
-| 已扫码登录 | 未登录时脚本返回 `logged_in/loggedIn=false`，据此提示去账号页 |
+| 已扫码登录 | 未登录时脚本返回 `loggedIn=false`，据此提示去账号页 |
 | 网络 | 代理**自动按平台**处理（小红书直连、其它走 env），无需手动指定 |
 
 ## 能力范围
@@ -51,8 +51,8 @@ account_stats fetch `--platform`：`xiaohongshu` / `douyin` / `kuaishou` / `zhih
 判断用户问的是「身份」还是「数据」
   ├ 身份（我是谁/登录了哪些号） → whoami（可多平台各跑一次）
   └ 数据（粉丝/帖子/获赞/最近发啥） → account_stats.py fetch --platform <平台>
-        ├ logged_in=true  → 按用户问题提取对应字段回答（粉丝数 / 最近 N 条作品标题+链接 …）
-        └ logged_in=false → 提示"你还没登录 X，去『账号』页扫码"
+        ├ loggedIn=true  → 按用户问题提取对应字段回答（粉丝数 / 最近 N 条作品标题+链接 …）
+        └ loggedIn=false → 提示"你还没登录 X，去『账号』页扫码"
 ```
 
 ## 与其他 SKILL 的分工

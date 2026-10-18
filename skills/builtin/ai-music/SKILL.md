@@ -112,4 +112,4 @@ python skills/shared/scripts/video_ops.py bgm -i clip.mp4 -o clip_bgm.mp4 \
 3. **不重造能力** — 裁剪 / 归一化 / 加视频 BGM 复用 `audio_ops.py` / `video_ops.py`。
 4. **provider 可插拔** — 换服务商只改 `--provider` + env，SKILL 流程不变。
 5. **与 tts-voiceover 分工** — 背景音乐/配乐找 ai-music，人声配音找 tts-voiceover。
-   两者可组合：ai-music 出 BGM + tts-voiceover 出旁白 → `video_ops.py bgm` 混音。
+   两者可组合：音频文件内的人声+BGM 用 `audio_mix.py mix`；给视频加 BGM/旁白才用 `video_ops.py bgm`（旁白短于视频时加 `--music-loop-off`）。

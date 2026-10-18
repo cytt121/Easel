@@ -17,24 +17,22 @@ metadata:
       - kind: node
         package: "@lucasygu/redbook"
         bins: [redbook]
-    os: [macos]
     homepage: https://github.com/lucasygu/redbook
 ---
 
 # Redbook — 小红书内容分析 CLI
 
-用 `redbook` CLI 搜索笔记、读内容、分析创作者、提取爆款规律、研究选题。**OpenClaw 用户：** `clawhub install redbook` 或 `npm install -g @lucasygu/redbook`。
+用 `redbook` CLI 搜索笔记、读内容、分析创作者、提取爆款规律、研究选题。**OpenClaw 用户：** `clawhub install redbook` 或 `npm install -g @lucasygu/redbook --ignore-scripts`。Easel 环境里推荐 `--ignore-scripts`，避免上游 postinstall 额外写入带发布/评论能力的技能。
 
-## ⚠️ 环境依赖（当前环境不可用）
+## ⚠️ 环境依赖
 
-本 SKILL 依赖以下运行时，**在当前"macOS 专属 / Linux"环境下不可用**，属于死代码保留，仅供部署到 macOS 桌面时启用：
+本 SKILL 不是 macOS 专属。Linux/WSL 可用 `REDBOOK_COOKIE_STRING` 或 `REDBOOK_COOKIE_FILE`（默认 `~/.redbook/cookies.json`）提供登录态；macOS keychain / 浏览器抽取只是 cookie 来源之一。
 
 | 依赖 | 说明 |
 |------|------|
-| macOS | cookie 抽取用原生 keychain（`os: [macos]`） |
 | Node.js ≥ 22 | 运行 `@lucasygu/redbook` CLI |
-| `redbook` binary | 经 `clawhub install redbook` / npm 安装 |
-| Chrome 登录 cookie | 需在 Chrome 登录 xiaohongshu.com（或 Safari/Firefox + `--cookie-source`） |
+| `redbook` binary | 经 `clawhub install redbook` / `npm install -g @lucasygu/redbook --ignore-scripts` 安装 |
+| 登录 cookie | 优先 `REDBOOK_COOKIE_STRING`；其次 `REDBOOK_COOKIE_FILE` / `~/.redbook/cookies.json`；也可用已登录浏览器（桌面环境） |
 | puppeteer-core + marked | 仅 `render` 卡片渲染需要（可选） |
 
 ## 与 skill-xhs-publisher 的分工边界
@@ -86,5 +84,5 @@ redbook health --all --json          # 笔记限流检测
 
 ## Requirements
 
-- macOS（cookie 抽取用原生 keychain）· Node.js ≥ 22 · 已在 Chrome 登录 xiaohongshu.com
+- Node.js ≥ 22 · 已安装 `redbook` · 提供 `REDBOOK_COOKIE_STRING` / cookie 文件，或在支持的桌面浏览器中已登录 xiaohongshu.com
 - 仅卡片渲染额外需 `puppeteer-core` + `marked`（用本机 Chrome，无需额外下载浏览器）

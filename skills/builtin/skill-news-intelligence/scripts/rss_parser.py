@@ -1,14 +1,16 @@
 
 import sys
 import requests
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning
 import urllib3
 import re
 import time
+import warnings
 from datetime import datetime
 
 # Suppress insecure request warnings
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
 
 def clean_text(text):
     if not text: return ""
