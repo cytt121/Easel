@@ -187,6 +187,8 @@ export class DurableToolStore {
     });
   }
 
+  isAvailable() { return !this.#failed; }
+
   close() {
     this.#failed = true;
     this.#db.close();

@@ -29,7 +29,7 @@ jobs:
         shell: bash
         run: npm install --prefix "$RUNNER_TEMP/budget-runtime" --ignore-scripts --no-audit --no-fund openclaw@2026.10.2
       - name: Verify admission ledger and hook adapter
-        run: node --test tests/frontend/toolBudget.test.mjs tests/frontend/toolBudgetHooks.test.mjs
+        run: node --test tests/frontend/toolBudget*.test.mjs
       - name: Verify native direct tools, concurrent stop isolation, and thinking deadline
         shell: bash
         run: node scripts/verify_native_tool_budget.mjs "$RUNNER_TEMP/budget-runtime/node_modules/openclaw"
