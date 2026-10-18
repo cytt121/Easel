@@ -7,7 +7,8 @@ const denied = reason => ({ block: true, blockReason: `Easel tool budget: ${reas
 
 /** Dependency-injected transport keeps admission synchronous; stop never widens its target. */
 export function installBudgetHooks(api, { stop, clock, store = null, schedule = setTimeout, cancel = clearTimeout }) {
-  const config = api.pluginConfig;
+  const config = Object.freeze({ maxCalls: api.pluginConfig.maxCalls, timeoutMs: api.pluginConfig.timeoutMs,
+    ...(api.pluginConfig.stateFile === undefined ? {} : { stateFile: api.pluginConfig.stateFile }) });
   const monotonic = clock ?? (() => performance.now());
   // Validate configuration before registering any partial protection.
   new ToolBudget({ maxCalls: config.maxCalls, timeoutMs: config.timeoutMs, clock });
@@ -117,4 +118,5 @@ export function installBudgetHooks(api, { stop, clock, store = null, schedule = 
     if (store?.finish(target).reason === 'storage_unavailable') state.blockReason = 'storage_unavailable';
     emit(state, 'easel_budget_end');
   });
+  return config;
 }

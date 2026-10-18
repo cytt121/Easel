@@ -4,6 +4,21 @@ import { installBudgetHooks } from '../../agents/tool-budget/hooks.mjs';
 
 const context = { agentId: 'fixture', sessionKey: 'session-private', runId: 'run-private' };
 const drain = () => new Promise(resolve => setImmediate(resolve));
+
+test('registered policy remains the policy enforced by later runs', () => {
+  const pluginConfig = { maxCalls: 1, timeoutMs: 100 };
+  const hooks = {};
+  const policy = installBudgetHooks({ pluginConfig,
+    on: (name, handler) => { hooks[name] = handler; }, logger: { info() {} } },
+  { stop: () => ({}), clock: () => 0, schedule: () => ({ unref() {} }), cancel() {} });
+  pluginConfig.maxCalls = 99;
+  pluginConfig.timeoutMs = 99999;
+  assert.ok(Object.isFrozen(policy));
+  assert.deepEqual(policy, { maxCalls: 1, timeoutMs: 100 });
+  assert.equal(hooks.before_agent_run({}, context).outcome, 'pass');
+  assert.equal(hooks.before_tool_call({ toolCallId: 'first' }, context), undefined);
+  assert.equal(hooks.before_tool_call({ toolCallId: 'second' }, context).block, true);
+});
 function fixture(options = {}) {
   let now = 0;
   const hooks = {}, logs = [], stops = [], timers = [];

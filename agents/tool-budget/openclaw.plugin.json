@@ -2,6 +2,7 @@
   "id": "easel-tool-budget",
   "name": "Easel per-run tool budget",
   "description": "Opt-in admission limits for native OpenClaw runs; requires verified lifecycle identities.",
+  "contracts": { "gatewayMethodDispatch": ["authenticated-request"] },
   "configSchema": {
     "type": "object",
     "additionalProperties": false,

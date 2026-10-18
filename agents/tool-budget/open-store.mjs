@@ -6,6 +6,6 @@ export function openBudgetStore(path) {
   try { return new DurableToolStore(path); }
   catch {
     const denied = () => ({ allowed: false, reason: 'storage_unavailable' });
-    return { begin: denied, reserve: denied, finish: denied, close() {} };
+    return { begin: denied, reserve: denied, finish: denied, isAvailable: () => false, close() {} };
   }
 }

@@ -151,3 +151,48 @@ durable modes, on Linux and Windows; it does not upload raw gateway logs or
 transcripts. These native checks use fresh isolated state. Same-identity
 reopening is tested separately with hook reinstallation and real child-process
 death; the fixture does not assert native recovery preserves run IDs.
+
+## Active process capability evidence
+
+The plugin registers the read-only Gateway RPC `easel.toolBudget.capability`
+after its execution hooks have registered. Supply a fresh 32–128 character
+lowercase hexadecimal `nonce`. The response echoes the nonce and includes a
+registration-specific `instanceId`, the pinned runtime version, immutable
+`maxCalls`/`timeoutMs`, and `durability` (`process_memory` or `sqlite`). The method requires
+`operator.read` and the Gateway's normal profile authorization.
+
+The probe rejects unsupported runtime versions, disabled conversation hooks,
+disabled plugins, unavailable active configuration, and configuration that no
+longer matches the installed hooks, including a changed ledger path. A known unavailable ledger also rejects the probe and guarded submission. This is a current readiness check, not a guarantee against future I/O failure. It neither runs a model nor executes tools.
+The native acceptance script checks this response before exercising the actual
+execution limits through the same isolated Gateway fixture.
+
+This is active registration evidence, **not a request admission token**. A
+client must not cache it as permission for a later request, silently reconnect
+to another Gateway, or enable strict mode on the strength of this response
+alone. Use the guarded entrypoint below when submitting with this evidence.
+
+## Guarded task submission
+
+`easel.toolBudget.send` accepts exactly `instanceId`, `maxCalls`, `timeoutMs`,
+`sessionKey`, `message`, and `idempotencyKey`. The first three values must match
+the current capability response and the still-active immutable hook policy.
+Changing the Gateway registration, disabling the plugin, or changing the
+configured limits invalidates the request before dispatch.
+
+This method requires `operator.write` and normal Gateway profile authorization.
+It forwards only the three chat fields through the pinned SDK's authenticated
+**in-process** `dispatchGatewayMethod('chat.send', ...)`, which retains the
+requester's scope and lifetime without constructing a synthetic operator or
+opening another connection. Core chat authorization and idempotency still
+apply. The response confirms core admission, not successful task completion;
+observe the normal run events for the outcome.
+
+There is no HTTP/CLI fallback. A dispatch timeout or connection loss can occur
+after acceptance; the caller must inspect the original task before retrying,
+and must not generate a fresh idempotency key to bypass an uncertain outcome.
+The native acceptance script now exercises actual tools through this guarded
+entrypoint and rejects a previous registration ID before any model request.
+Existing Easel chat transports and the global strict-mode setting are not yet
+wired to this endpoint; do not describe those transports as protected by this
+new admission binding until that integration is installed and verified.
