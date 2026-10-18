@@ -473,7 +473,7 @@ def test_video_pipeline_gates_empty_phase_fails_and_python_placeholder(monkeypat
     with pytest.raises(SystemExit) as exc:
         aggregate.main()
     assert exc.value.code == 0
-    assert sys.executable in calls[-1][-1]
+    assert calls[-1][-1] == sys.executable.replace("\\", "/") + " -c pass"
 
 
 def test_video_pipeline_stage_respects_empty_gate_failure(monkeypatch, tmp_path):
