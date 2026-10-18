@@ -1,0 +1,38 @@
+name: Integrated agent reliability audit
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Verification branch only: keep the feature PRs independent.
+jobs:
+  regression:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24.19.0'
+      - name: Install test dependencies
+        run: python -m pip install --prefer-binary -e . pytest
+      - name: Full Python regression including skill tests
+        timeout-minutes: 10
+        run: python -m pytest -q -o faulthandler_timeout=90
+      - name: Budget and recovery frontend regression
+        run: node --test tests/frontend/*.test.mjs
+      - name: Install frontend dependencies
+        working-directory: web/frontend
+        run: npm ci
+      - name: Typecheck and build recovery UI
+        working-directory: web/frontend
+        run: npm run build
