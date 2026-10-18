@@ -30,11 +30,11 @@ jobs:
       - name: Full Python regression including skill tests
         timeout-minutes: 10
         run: python -m pytest -q -o faulthandler_timeout=90
-      - name: Budget and recovery frontend regression
-        run: node --test tests/frontend/*.test.mjs
       - name: Install frontend dependencies
         working-directory: web/frontend
         run: npm ci
+      - name: Budget and recovery frontend regression
+        run: node --test tests/frontend/*.test.mjs
       - name: Typecheck and build recovery UI
         working-directory: web/frontend
         run: npm run build
